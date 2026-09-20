@@ -1,0 +1,4 @@
+project_id = "esp32s3-link"
+
+[functions.device-gateway]
+verify_jwt = false

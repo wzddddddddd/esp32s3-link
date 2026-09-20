@@ -4,7 +4,17 @@
 
 - 网站：https://wzddddddddd.github.io/esp32s3-link/
 - 独立仓库：https://github.com/wzddddddddd/esp32s3-link
-- GitHub Pages 使用 Actions 发布；网页仍是演示模式，尚未连接云端或真实设备。
+- GitHub Pages 使用 Actions 发布；已增加 Supabase 云端模式，原演示版可从登录页单独进入。
+
+## 云端模式
+
+云端项目 `rtoljcxkyqikeiheouyt`：受邀邮箱登录、私有图片/TXT/固件存档上传、设备登记、图片/TXT 下载任务、真实设备进度读取、等待任务取消。管理员将受邀 Auth 用户加入 `private.link_members` 后才允许访问工作空间。匿名访问、跨账号访问及直接修改设备/任务被拒绝。
+
+设备必须实现独立凭证认证和 HTTPS 下载协议后才能执行任务。真实 OTA 当前在界面和服务端均禁用。云端没有模拟计时器；只有设备完成字节与 SHA-256 校验回报，任务才会显示完成。
+
+配置及协议见 [Supabase 接入说明](docs/supabase.md)。`public/cloud-config.json` 仅含公开项目地址和 publishable 公钥，可以随静态网站发布；绝不能写入 service_role、数据库密码或设备密钥。
+
+下列第一阶段功能和“仅浏览器内存”说明适用于独立演示模式，不适用于云端模式。
 
 ## 当前可以使用
 
