@@ -2,6 +2,10 @@
 
 第一阶段可交互网站框架。使用 React、TypeScript、Vite，输出静态网站，可部署到 GitHub Pages。
 
+- 网站：https://wzddddddddd.github.io/esp32s3-link/
+- 独立仓库：https://github.com/wzddddddddd/esp32s3-link
+- GitHub Pages 使用 Actions 发布；网页仍是演示模式，尚未连接云端或真实设备。
+
 ## 当前可以使用
 
 - 设备总览、资源库、发送资源、任务记录、OTA、设备设置六个页面。
@@ -24,7 +28,6 @@
 需要 Node.js 22 或更新的受支持版本。
 
 ```powershell
-cd web_wifi
 npm ci
 npm run dev
 ```
@@ -38,9 +41,9 @@ npm run preview
 
 `npm run build` 进行 TypeScript 检查并生成 `dist/`。不要直接双击 HTML；请使用 HTTP 预览。开发依赖锁定在 `package-lock.json`。
 
-## GitHub Pages 部署准备
+## GitHub Pages 部署
 
-本阶段仅准备部署配置，不自动提交、推送或发布。
+独立仓库已配置 `.github/workflows/github-pages.yml`。更新网站代码并推送后，在 Actions 手动运行 `Deploy LINK to GitHub Pages` 发布。以下为迁移到其他仓库时的配置步骤。
 
 1. 确认目标仓库。若整个 ESP32S3_MP3 仓库用于部署，网页路径保留为 `web_wifi`；若新建专用网站仓库，将本目录内容作为仓库根目录。
 2. 将 `deployment/github-pages.yml` 放入**目标仓库根目录**的 `.github/workflows/github-pages.yml`。
