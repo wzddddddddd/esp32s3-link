@@ -1,0 +1,8 @@
+node_modules/
+.deploy/
+dist/
+*.tsbuildinfo
+.env
+.env.local
+.sites-runtime/
+*.log

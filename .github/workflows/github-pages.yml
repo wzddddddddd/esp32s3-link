@@ -1,0 +1,52 @@
+name: Deploy LINK to GitHub Pages
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Locate website
+        id: site
+        shell: bash
+        run: |
+          if [ -f web_wifi/package.json ]; then
+            echo "directory=web_wifi" >> "$GITHUB_OUTPUT"
+          else
+            echo "directory=." >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ${{ steps.site.outputs.directory }}/package-lock.json
+      - run: npm ci
+        working-directory: ${{ steps.site.outputs.directory }}
+      - run: npm run build
+        working-directory: ${{ steps.site.outputs.directory }}
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ steps.site.outputs.directory }}/dist
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
