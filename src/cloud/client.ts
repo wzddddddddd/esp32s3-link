@@ -65,9 +65,13 @@ export function makeClient(config: CloudConfig): SupabaseClient {
         "网站只能配置 publishable 或 anon 公钥，不能配置管理员密钥。",
       );
   }
+  // Dashboard invitations use an implicit callback; normal email login uses PKCE.
+  const callback = new URLSearchParams(window.location.hash.slice(1));
+  const invitationCallback =
+    callback.get("type") === "invite" && callback.has("access_token");
   return createClient(url.origin, key, {
     auth: {
-      flowType: "pkce",
+      flowType: invitationCallback ? "implicit" : "pkce",
       detectSessionInUrl: true,
       persistSession: true,
       autoRefreshToken: true,

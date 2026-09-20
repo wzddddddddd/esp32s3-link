@@ -5,7 +5,7 @@
 - 站点：https://wzddddddddd.github.io/esp32s3-link/
 - 发布分支：`main`
 - 工作流：`Deploy LINK to GitHub Pages`，手动触发。
-- 网站第一版仍使用演示设备和模拟任务，没有云端资源存储或设备通信。
+- 当前正式入口已连接 Supabase，提供邮箱登录、私有资源存储和设备任务接口。独立演示模式仍使用模拟数据；真实硬件下载与 OTA 尚待固件接入。具体配置和边界见 `supabase.md`。
 
 ## 本地目录与后续更新
 
