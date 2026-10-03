@@ -9,6 +9,7 @@
 - 新版提交：`b606656`；发布记录：https://github.com/wzddddddddd/esp32s3-link/actions/runs/37102296508 。
 - 音乐目录显示修复：`acf2530`；自动发布配置：`0a3eea1`。第 5 次发布成功：https://github.com/wzddddddddd/esp32s3-link/actions/runs/37105651741 。目录显示在音乐操作区下方，逐页显示，读取类命令最多等待 90 秒；完成记录可以点击「显示目录」重新打开返回内容。
 - 最终目录自动滚动与实际播放错误提示：`9b19794`，第 7 次发布成功：https://github.com/wzddddddddd/esp32s3-link/actions/runs/37106185058 。真实设备目录读取返回 `11.mp3`；旧固件播放状态报告 `error=257`（内存不足），更新音频 DMA 初始化后的固件需要上板确认。
+- 目录迟到恢复：`50753f5`，第 8 次发布成功：https://github.com/wzddddddddd/esp32s3-link/actions/runs/37110614792 。90 秒释放等待后按准确任务编号继续观察并自动显示；重复点击同一待处理目录不再排队。真实设备曾耗时约 250 秒返回目录；板端心跳与命令调度修复见 `display/releases/late_directory_20261003/`，未烧录。
 
 ## 本地目录与后续更新
 
