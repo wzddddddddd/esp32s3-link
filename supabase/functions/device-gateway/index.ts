@@ -12,10 +12,25 @@ Deno.serve(async request => {
     const text = await request.text();
     if (text.length > 65536) return respond({ error: 'PAYLOAD_TOO_LARGE' }, 413);
     const input = JSON.parse(text);
-    if (!input || !['heartbeat', 'claim', 'progress'].includes(input.action) || (input.payload && (typeof input.payload !== 'object' || Array.isArray(input.payload)))) return respond({ error: 'INVALID_REQUEST' }, 400);
+    const commands = ['command_claim', 'command_progress', 'command_result'];
+    if (!input || !['heartbeat', 'claim', 'progress', ...commands].includes(input.action) || (input.payload && (typeof input.payload !== 'object' || Array.isArray(input.payload)))) return respond({ error: 'INVALID_REQUEST' }, 400);
     const client = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!, { auth: { persistSession: false, autoRefreshToken: false } });
-    const result = await client.rpc('link_device_request', { p_device_id: id, p_token: token, p_action: input.action, p_payload: input.payload || {} });
+    const result = await client.rpc(commands.includes(input.action) ? 'link_device_command' : 'link_device_request', { p_device_id: id, p_token: token, p_action: input.action, p_payload: input.payload || {} });
     if (result.error) return respond({ error: result.error.code === '28000' ? 'UNAUTHORIZED' : 'REQUEST_REJECTED' }, result.error.code === '28000' ? 401 : 409);
+    if (result.data?.command) {
+      const { download_path, upload_path, ...command } = result.data.command;
+      if (command.op === 'put') {
+        const signed = await client.storage.from('link-resources').createSignedUrl(download_path, 900);
+        if (signed.error) return respond({ error: 'DOWNLOAD_URL_UNAVAILABLE', retryable: true }, 503);
+        return respond({ command: { ...command, download_url: signed.data.signedUrl } });
+      }
+      if (command.op === 'get') {
+        const signed = await client.storage.from('link-resources').createSignedUploadUrl(upload_path, { upsert: true });
+        if (signed.error) return respond({ error: 'UPLOAD_URL_UNAVAILABLE', retryable: true }, 503);
+        return respond({ command: { ...command, upload_url: signed.data.signedUrl } });
+      }
+      return respond({ command });
+    }
     if (result.data?.task) {
       const { storage_path, ...task } = result.data.task;
       const signed = await client.storage.from('link-resources').createSignedUrl(storage_path, 900);

@@ -16,7 +16,7 @@ export interface CloudDevice {
 export interface CloudResource {
   id: string;
   name: string;
-  kind: "image" | "text" | "firmware";
+  kind: "image" | "text" | "firmware" | "file";
   size_bytes: number;
   sha256: string;
   storage_path: string;

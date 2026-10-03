@@ -1,0 +1,11 @@
+.file-manager { display: grid; gap: 18px; }
+.file-manager p { line-height: 1.75; overflow-wrap: anywhere; }
+.file-toolbar { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+.file-toolbar strong { flex: 1 1 180px; overflow-wrap: anywhere; }
+.file-manager button { border: 1px solid var(--line); border-radius: 8px; padding: 9px 14px; }
+.file-manager button:disabled { opacity: .45; }
+.file-manager input:not([type=checkbox]), .file-manager select { padding: 10px; max-width: 100%; }
+.file-help { color: var(--muted); font-size: 13px; }
+.file-list { display: grid; gap: 8px; }
+.file-list > div { display: flex; gap: 12px; padding: 14px; border: 1px solid var(--line); align-items: center; flex-wrap: wrap; border-radius: 8px; }
+.file-list span:first-child { flex: 1 1 220px; overflow-wrap: anywhere; }

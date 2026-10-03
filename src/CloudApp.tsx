@@ -21,6 +21,7 @@ import {
   type CloudTask,
 } from "./cloud/client";
 import { formatSize } from "./demo";
+import CloudFiles from './CloudFiles';
 
 const labels = {
   devices: "我的设备",
@@ -28,6 +29,7 @@ const labels = {
   send: "发送资源",
   tasks: "任务记录",
   ota: "OTA 更新",
+  files: "SD 文件传输",
 };
 type View = keyof typeof labels;
 const errorText = (e: unknown) =>
@@ -287,6 +289,7 @@ export default function CloudApp({
           {(
             [
               { id: "devices", icon: CircuitBoard },
+              { id: "files", icon: FolderOpen },
               { id: "resources", icon: FolderOpen },
               { id: "send", icon: Send },
               { id: "tasks", icon: ListChecks },
@@ -344,6 +347,7 @@ export default function CloudApp({
               {busy}…
             </div>
           )}
+          {view === "files" && <CloudFiles key={session.user.id} client={client} devices={devices} />}
           {view === "devices" && (
             <>
               <form
@@ -481,20 +485,20 @@ export default function CloudApp({
                             ? "图片"
                             : r.kind === "text"
                               ? "TXT 小说"
-                              : "固件存档"}{" "}
+                              : r.kind === "file" ? "普通文件" : "固件存档"}{" "}
                           · {new Date(r.created_at).toLocaleDateString("zh-CN")}
                         </p>
                       </div>
                       <button
                         className="text-button"
-                        disabled={!!busy}
+                        disabled={!!busy || r.kind === "file"}
                         onClick={() => void openPreview(r)}
                       >
                         {r.kind === "firmware" ? "查看说明" : "预览"}
                       </button>
                       <button
                         className="button"
-                        disabled={r.kind === "firmware"}
+                        disabled={r.kind === "firmware" || r.kind === "file" || r.size_bytes === 0}
                         onClick={() => {
                           setResourceId(r.id);
                           setView("send");
@@ -539,7 +543,7 @@ export default function CloudApp({
                 >
                   <option value="">请选择图片或小说</option>
                   {resources
-                    .filter((r) => r.kind !== "firmware")
+                    .filter((r) => (r.kind === "image" || r.kind === "text") && r.size_bytes > 0)
                     .map((r) => (
                       <option value={r.id} key={r.id}>
                         {r.name} · {formatSize(r.size_bytes)}
@@ -561,7 +565,7 @@ export default function CloudApp({
               <button
                 className="button primary"
                 disabled={
-                  !!busy || !device || !resource || resource.kind === "firmware"
+                  !!busy || !device || !resource || !["image", "text"].includes(resource.kind) || resource.size_bytes === 0
                 }
                 onClick={() => setConfirm(true)}
               >
