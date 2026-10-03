@@ -14,7 +14,16 @@ export default function CloudFiles({ client, devices }: { client: SupabaseClient
   const [busy, setBusy] = useState(false), [message, setMessage] = useState(''), [error, setError] = useState('');
   const [overwrite, setOverwrite] = useState(false);
   const [musicStatus, setMusicStatus] = useState('尚未读取'), [volume, setVolume] = useState(60);
-  async function music(op: string, path = '/', args: Record<string, unknown> = {}) { await run(async g => { const accepted = await g.command(op, path, args); const state = op === 'music.status' ? accepted : await g.command('music.status', '/'); setMusicStatus(`${state.state} · ${state.path || ''} · ${state.position_ms || 0} ms`); }); }
+  async function music(op: string, path = '/', args: Record<string, unknown> = {}) {
+    await run(async g => {
+      const accepted = await g.command(op, path, args);
+      const state = op === 'music.status' ? accepted : await g.command('music.status', '/');
+      const label = ({Playing:'正在播放',Paused:'已暂停',Stopped:'已停止',Opening:'正在打开',Buffering:'正在缓冲',Finished:'播放结束',Error:'播放失败'} as Record<string,string>)[String(state.state)] || String(state.state);
+      setMusicStatus(`${label} · ${state.path || ''} · ${state.position_ms || 0} ms`);
+      if (state.state === 'Error') throw new Error(state.error === 257 ? '设备播放器内存不足。播放指令已收到，但音乐没有开始播放。' : `设备播放失败（错误 ${state.error}），请检查设备日志。`);
+      return '设备播放状态已更新。';
+    });
+  }
   const active = useRef<AbortController | null>(null), input = useRef<HTMLInputElement>(null), folderInput = useRef<HTMLInputElement>(null);
   useEffect(() => () => active.current?.abort(), []);
   useEffect(() => { if (!device && devices.length) setDevice(devices[0].id); }, [device, devices]);
