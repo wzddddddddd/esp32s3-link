@@ -3,6 +3,13 @@ import JSZip from 'jszip';
 
 export interface Entry { name: string; size: number; directory: boolean }
 export interface Command { id: string; op: string; path: string; cursor: number; status: string; error: string | null; result: Record<string, unknown> | null }
+export interface DirectoryResume { cursor: number; entries: Entry[] }
+export class DirectoryPendingError extends Error {
+  constructor(readonly device: string, readonly id: string, readonly path: string, readonly cursor: number, readonly entries: Entry[] = []) {
+    super('设备返回较慢，目录请求仍在处理；请查看任务记录。');
+    this.name = 'DirectoryPendingError';
+  }
+}
 const MAX_FILE = 50 * 1024 * 1024;
 export function child(parent: string, name: string) {
   if (!name || name === '.' || name === '..' || /[\\/\x00-\x1f:*?"<>|]/.test(name) || /[. ]$/.test(name)) throw new Error('文件名不受 SD 卡支持：' + name);
@@ -38,7 +45,8 @@ export class FilesGateway {
       const queued = await this.client.rpc(business ? 'link_queue_remote' : 'link_queue_command', business ? { p_device_id: this.device, p_op: op, p_path: path, p_args: extra } : { p_device_id: this.device, p_op: op, p_path: path, ...extra }).abortSignal(signal);
       check(signal);
       if (queued.error) throw queued.error;
-      id = String(queued.data);
+      if (typeof queued.data !== 'string' || !queued.data.trim()) throw new Error('云端未返回任务编号，请查看任务记录。');
+      id = queued.data;
       while (true) {
         check(signal);
         const reply = await this.client.from('link_commands').select('*').eq('id', id).abortSignal(signal).single();
@@ -51,25 +59,41 @@ export class FilesGateway {
         await pause(signal);
       }
     } catch (error) {
+      // A directory deadline only releases the foreground wait. Keep the exact
+      // queued command so the page can recover its eventual result by ID.
+      if (op === 'list' && id && timeout.signal.aborted && !this.signal.aborted) {
+        throw new DirectoryPendingError(this.device, id, path, Number(extra.p_cursor ?? 0));
+      }
       // Only unclaimed commands can be cancelled. A device already writing a
       // file must finish/abort safely; never claim a browser abort rolled it back.
       // Cleanup must not leave the page locked if the network is unavailable.
       if (id) void this.client.rpc('link_cancel_command', { p_id: id }).abortSignal(AbortSignal.timeout(5000)).then(() => {}, () => {});
-      throw timeout.signal.aborted ? timeout.signal.reason : error;
+      throw timeout.signal.aborted && !this.signal.aborted ? timeout.signal.reason : error;
     } finally {
       clearTimeout(timer);
     }
   }
-  async list(path: string, onPage?: (entries: Entry[], complete: boolean) => void, firstPage?: Record<string, unknown>): Promise<Entry[]> {
-    const all: Entry[] = []; let cursor = 0;
+  async list(path: string, onPage?: (entries: Entry[], complete: boolean) => void, firstPage?: Record<string, unknown>, resume?: DirectoryResume): Promise<Entry[]> {
+    const all: Entry[] = [...(resume?.entries ?? [])]; let cursor = resume?.cursor ?? 0;
+    if (!Number.isSafeInteger(cursor) || cursor < 0) throw new Error('目录游标无效');
+    if (all.length > 10000) throw new Error('单目录超过 10000 项');
+    for (const item of all) {
+      if (!item || typeof item.name !== 'string' || typeof item.directory !== 'boolean' || !Number.isSafeInteger(item.size) || item.size < 0) throw new Error('设备目录项无效');
+      child(path, item.name);
+    }
     while (true) {
       check(this.signal);
-      const r = firstPage ?? await this.command('list', path, { p_cursor: cursor });
+      let r: Record<string, unknown>;
+      try { r = firstPage ?? await this.command('list', path, { p_cursor: cursor }); }
+      catch (error) {
+        if (error instanceof DirectoryPendingError) throw new DirectoryPendingError(error.device, error.id, path, cursor, [...all]);
+        throw error;
+      }
       firstPage = undefined;
       check(this.signal);
       if (!Array.isArray(r.entries) || typeof r.end !== 'boolean') throw new Error('设备返回无效目录');
       for (const item of r.entries) {
-        if (typeof item.name !== 'string' || typeof item.directory !== 'boolean' || !Number.isSafeInteger(item.size) || item.size < 0) throw new Error('设备目录项无效');
+        if (!item || typeof item.name !== 'string' || typeof item.directory !== 'boolean' || !Number.isSafeInteger(item.size) || item.size < 0) throw new Error('设备目录项无效');
         child(path, item.name); all.push(item as Entry);
       }
       if (all.length > 10000) throw new Error('单目录超过 10000 项');

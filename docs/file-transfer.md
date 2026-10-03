@@ -10,6 +10,10 @@
 
 第 7 次发布让目录获取后自动滚动至结果，并显示实际播放失败原因。旧固件联调中 `music.play` 被接受，但 `music.status` 报 `error=257`/`position_ms=0`；不能将任务完成当成已经发声。新版固件扬声器启动就设为双声道、16 KiB DMA，避免播放时从单声道扩容申请额外 16 KiB 内部内存；MP3 和视频管线回归通过，未烧录。视频 128 KiB PCM 缓冲保留，DMA 调度余量降低，设备实测仍必要。
 
+目录迟到恢复修复：实际 `/music` 请求在 16:22:24 提交、16:26:34 完成，耗时约 250 秒。现在 90 秒只释放前台等待，已知编号的目录任务继续处理；页面按同一设备和任务编号观察，返回后自动显示并继续分页。同一目录等待期间重复点击不会再提交。切换设备/目录、取消读取或执行文件修改后，旧结果不会覆盖当前目录。观察期间保持页面打开；以前已经完成的记录仍可用「显示目录」打开，不能把历史结果当成新的设备读取。
+
+板端云端 worker 同步修复：心跳失败不会阻止领取命令，新命令与待确认结果优先于旧资源传输。待确认结果保持重发，避免响应丢失后重复写入文件；HTTP 失败记录操作、阶段、状态码、耗时和内存，不记录凭证。对应固件见 `display/releases/late_directory_20261003/`，仅交付，未烧录。
+
 1. 在现有项目先确认 `202609200001_link_cloud.sql` 已应用，再在 SQL Editor 执行 `supabase/migrations/202610030001_file_commands.sql`。不要重复执行旧迁移。
 2. 用已有部署流程发布 `supabase/functions/device-gateway/index.ts`。CLI 示例：`supabase functions deploy device-gateway --project-ref rtoljcxkyqikeiheouyt --no-verify-jwt`。函数自己校验设备 UUID + 设备密钥；不要求设备持有用户 JWT。`SUPABASE_SERVICE_ROLE_KEY` 只由服务端环境提供。
 3. 运行 `npm ci`、`npm run test:cloud`、`npm run build`，按现有 GitHub Pages 工作流发布 `dist/`。不要把设备密钥、管理员密钥写进前端配置。

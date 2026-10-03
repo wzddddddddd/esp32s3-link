@@ -8,7 +8,7 @@ test('browser transfer checks hashes, walks paginated directories and preserves 
   const compiled = new URL(`./.file-client-${process.pid}.mjs`, import.meta.url);
   await writeFile(compiled, ts.transpileModule(await readFile(new URL('../src/cloud/files.ts', import.meta.url), 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText);
   try {
-    const { child, FilesGateway, sha256 } = await import(compiled.href);
+    const { child, FilesGateway, DirectoryPendingError, sha256 } = await import(compiled.href);
     for (const name of ['..', 'a/b', 'a\\b', 'a.', 'a ', 'x:y']) assert.throws(() => child('/',name));
     assert.throws(() => child('/','.link')); assert.equal(child('/novels','中文.txt'),'/novels/中文.txt');
     const g = new FilesGateway({}, 'device', new AbortController().signal, () => {});
@@ -63,14 +63,86 @@ test('browser transfer checks hashes, walks paginated directories and preserves 
     assert.equal(sent[2].args.p_cursor,8);
     const stopped = new FilesGateway({},'device',cancelled.signal,()=>{});
     await assert.rejects(stopped.command('get','/x'));
-    // A hung network response must time out too, rather than bypassing the
-    // directory deadline and keeping every button disabled indefinitely.
+    const flush = () => new Promise(resolve => setImmediate(resolve));
+    // A known directory request survives the foreground deadline. Its result
+    // arriving at 250 seconds can be displayed without queuing the same page.
+    t.mock.timers.enable({apis:['setTimeout']});
+    const lateCalls = [];
+    let lateReply = {status:'running',result:null};
+    const lateResult = {entries:[{name:'late.mp3',size:3,directory:false}],cursor:1,end:true};
+    setTimeout(() => { lateReply = {status:'completed',result:lateResult}; },250000);
+    const late = new FilesGateway({
+      rpc: (name,args) => { lateCalls.push({name,args}); return reply('late-command'); },
+      from: () => ({select: () => ({eq: () => ({abortSignal: () => ({single: () => reply(lateReply)})})})})
+    },'device',new AbortController().signal,()=>{});
+    const waiting = late.list('/music').catch(error => error);
+    await flush(); t.mock.timers.tick(90000);
+    const pending = await waiting;
+    assert.ok(pending instanceof DirectoryPendingError);
+    assert.deepEqual({device:pending.device,id:pending.id,path:pending.path,cursor:pending.cursor,entries:pending.entries},
+      {device:'device',id:'late-command',path:'/music',cursor:0,entries:[]});
+    assert.equal(lateCalls.length,1); assert.equal(lateCalls[0].name,'link_queue_command');
+    t.mock.timers.tick(160000);
+    assert.equal(lateReply.status,'completed');
+    assert.deepEqual(await late.list(pending.path,undefined,lateReply.result,pending),lateResult.entries);
+    assert.equal(lateCalls.length,1,'the already completed directory must not be submitted again');
+    t.mock.timers.reset();
+
+    // Resume a delayed second page at its original cursor, retaining page one
+    // and submitting only page three when the late page is not the final one.
+    t.mock.timers.enable({apis:['setTimeout']});
+    const paginatedCalls = [], pagesById = new Map();
+    const firstEntry = {name:'first.mp3',size:4,directory:false};
+    const secondEntry = {name:'second.mp3',size:5,directory:false};
+    const thirdEntry = {name:'third.mp3',size:6,directory:false};
+    const paginated = new FilesGateway({
+      rpc: (name,args) => {
+        paginatedCalls.push({name,args});
+        const id = `page-${args.p_cursor}`;
+        pagesById.set(id,args.p_cursor === 0 ? {status:'completed',result:{entries:[firstEntry],cursor:1,end:false}} : args.p_cursor === 1 ? {status:'running',result:null} : {status:'completed',result:{entries:[thirdEntry],cursor:3,end:true}});
+        return reply(id);
+      },
+      from: () => ({select: () => ({eq: (_column,id) => ({abortSignal: () => ({single: () => reply(pagesById.get(id))})})})})
+    },'device',new AbortController().signal,()=>{});
+    const partialPages = [];
+    const secondWaiting = paginated.list('/music',(entries,complete) => partialPages.push({entries,complete})).catch(error => error);
+    await flush(); t.mock.timers.tick(90000);
+    const secondPending = await secondWaiting;
+    assert.ok(secondPending instanceof DirectoryPendingError);
+    assert.equal(secondPending.id,'page-1'); assert.equal(secondPending.cursor,1);
+    assert.deepEqual(secondPending.entries,[firstEntry]);
+    assert.deepEqual(partialPages,[{entries:[firstEntry],complete:false}]);
+    assert.deepEqual(paginatedCalls.map(call => call.args.p_cursor),[0,1]);
+    const secondResult = {entries:[secondEntry],cursor:2,end:false};
+    const resumedPages = [];
+    assert.deepEqual(await paginated.list('/music',(entries,complete) => resumedPages.push({entries,complete}),secondResult,secondPending),[firstEntry,secondEntry,thirdEntry]);
+    assert.deepEqual(paginatedCalls.map(call => call.args.p_cursor),[0,1,2]);
+    assert.deepEqual(resumedPages,[{entries:[firstEntry,secondEntry],complete:false},{entries:[firstEntry,secondEntry,thirdEntry],complete:true}]);
+    await assert.rejects(paginated.list('/music',undefined,{entries:[],cursor:1,end:false},secondPending),/游标/);
+    t.mock.timers.reset();
+
+    // An explicit stop still cancels an unclaimed directory command rather
+    // than registering it for eventual background display.
+    const explicitStop = new AbortController(), stoppedCalls = [];
+    const manuallyStopped = new FilesGateway({
+      rpc: (name,args) => { stoppedCalls.push({name,args}); return reply('stop-command'); },
+      from: () => ({select: () => ({eq: () => ({abortSignal: () => ({single: () => reply({status:'waiting',result:null})})})})})
+    },'device',explicitStop.signal,()=>{});
+    const stoppedWaiting = assert.rejects(manuallyStopped.list('/music'),error => !(error instanceof DirectoryPendingError));
+    await flush(); explicitStop.abort(); await stoppedWaiting;
+    assert.deepEqual(stoppedCalls.map(call => call.name),['link_queue_command','link_cancel_command']);
+    assert.equal(stoppedCalls[1].args.p_id,'stop-command');
+
+    // A hung queue response must time out too, but without a known command ID
+    // it cannot be recovered or cancelled by guessing a historical request.
     t.mock.timers.enable({apis:['setTimeout']});
     const hang = {abortSignal: signal => new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), {once:true}))};
-    const timed = new FilesGateway({rpc: () => hang}, 'device', new AbortController().signal, () => {});
-    const timeoutCheck = assert.rejects(timed.command('list','/music'), /90 秒/);
+    const unknownCalls = [];
+    const timed = new FilesGateway({rpc: name => { unknownCalls.push(name); return hang; }}, 'device', new AbortController().signal, () => {});
+    const timeoutCheck = assert.rejects(timed.command('list','/music'),error => !(error instanceof DirectoryPendingError) && /90 秒/.test(error.message));
     t.mock.timers.tick(90000);
     await timeoutCheck;
+    assert.deepEqual(unknownCalls,['link_queue_command']);
     t.mock.timers.reset();
   } finally { await unlink(compiled); }
 });
