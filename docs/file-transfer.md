@@ -8,6 +8,8 @@
 
 同日第 5 次发布修复音乐目录的显示流程：进入「SD 文件传输」→「全部音乐」→目录中歌曲旁的「播放」。列表在文件上传工具上方，分页内容逐页出现，读取失败/超时会恢复按钮；历史 list 完成记录的「显示目录」可恢复结果。目录为空会明确显示。播放请求被接受后，通过初始化注入的观察回调请求设备 music 应用展开播放器；Wi-Fi 保持运行。自动跳转需要使用 `display/releases/remote_music_20261003/display_example.bin` 或对应源码构建，主应用写入偏移 `0x120000`。此版本只编译交付，未由代理烧录；设备界面跳转仍需上板验证。
 
+第 7 次发布让目录获取后自动滚动至结果，并显示实际播放失败原因。旧固件联调中 `music.play` 被接受，但 `music.status` 报 `error=257`/`position_ms=0`；不能将任务完成当成已经发声。新版固件扬声器启动就设为双声道、16 KiB DMA，避免播放时从单声道扩容申请额外 16 KiB 内部内存；MP3 和视频管线回归通过，未烧录。视频 128 KiB PCM 缓冲保留，DMA 调度余量降低，设备实测仍必要。
+
 1. 在现有项目先确认 `202609200001_link_cloud.sql` 已应用，再在 SQL Editor 执行 `supabase/migrations/202610030001_file_commands.sql`。不要重复执行旧迁移。
 2. 用已有部署流程发布 `supabase/functions/device-gateway/index.ts`。CLI 示例：`supabase functions deploy device-gateway --project-ref rtoljcxkyqikeiheouyt --no-verify-jwt`。函数自己校验设备 UUID + 设备密钥；不要求设备持有用户 JWT。`SUPABASE_SERVICE_ROLE_KEY` 只由服务端环境提供。
 3. 运行 `npm ci`、`npm run test:cloud`、`npm run build`，按现有 GitHub Pages 工作流发布 `dist/`。不要把设备密钥、管理员密钥写进前端配置。

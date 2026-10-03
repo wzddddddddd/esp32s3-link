@@ -8,6 +8,7 @@
 - 2026-10-03 正式入口已发布 SD 文件传输和远程音乐控制，文件与音乐数据库扩展、device-gateway 同步更新。真实设备音乐目录读取已验证；OTA 仍未启用。具体配置和边界见 `supabase.md` 与 `file-transfer.md`。
 - 新版提交：`b606656`；发布记录：https://github.com/wzddddddddd/esp32s3-link/actions/runs/37102296508 。
 - 音乐目录显示修复：`acf2530`；自动发布配置：`0a3eea1`。第 5 次发布成功：https://github.com/wzddddddddd/esp32s3-link/actions/runs/37105651741 。目录显示在音乐操作区下方，逐页显示，读取类命令最多等待 90 秒；完成记录可以点击「显示目录」重新打开返回内容。
+- 最终目录自动滚动与实际播放错误提示：`9b19794`，第 7 次发布成功：https://github.com/wzddddddddd/esp32s3-link/actions/runs/37106185058 。真实设备目录读取返回 `11.mp3`；旧固件播放状态报告 `error=257`（内存不足），更新音频 DMA 初始化后的固件需要上板确认。
 
 ## 本地目录与后续更新
 
