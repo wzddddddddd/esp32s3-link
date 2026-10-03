@@ -24,7 +24,8 @@ export default function CloudFiles({ client, devices }: { client: SupabaseClient
       return '设备播放状态已更新。';
     });
   }
-  const active = useRef<AbortController | null>(null), input = useRef<HTMLInputElement>(null), folderInput = useRef<HTMLInputElement>(null);
+  const active = useRef<AbortController | null>(null), input = useRef<HTMLInputElement>(null), folderInput = useRef<HTMLInputElement>(null), directoryPanel = useRef<HTMLDivElement>(null);
+  useEffect(() => { if (directoryState !== 'idle') directoryPanel.current?.scrollIntoView({ behavior: 'smooth', block: 'center' }); }, [directoryState, entries]);
   useEffect(() => () => active.current?.abort(), []);
   useEffect(() => { if (!device && devices.length) setDevice(devices[0].id); }, [device, devices]);
   useEffect(() => {
@@ -103,7 +104,7 @@ export default function CloudFiles({ client, devices }: { client: SupabaseClient
     <div className="file-toolbar"><strong>{musicDirectory ? '音乐目录' : 'SD 卡目录'} {path}</strong><button disabled={!ready || path === '/'} onClick={() => list(path.substring(0, path.lastIndexOf('/')) || '/')}>上一级</button><button disabled={!ready} onClick={() => list(path)}>刷新目录</button></div>
     <p role="status">{message}</p>{error && <p role="alert" className="cloud-error">{error}</p>}
     {busy && <button onClick={() => { active.current?.abort(); setMessage('已停止等待和后续任务；设备已领取的任务可能继续，请看记录。'); }}>停止后续任务</button>}
-    <div className="directory-panel" aria-label="设备目录">
+    <div ref={directoryPanel} className="directory-panel" aria-label="设备目录">
       <p className="file-help">{directoryState === 'loading' ? '正在获取目录，设备返回后会在这里显示…' : directoryState === 'partial' ? `已显示 ${entries.length} 项，目录尚未全部读取。` : directoryState === 'complete' ? `设备已返回 ${entries.length} 项` : '点击“全部音乐”或“刷新目录”读取设备文件。'}</p>
       {directoryState === 'complete' && entries.length === 0 && <p>此目录为空。</p>}
       <div className="file-list">{entries.map(entry => <div key={entry.name}><span>{entry.directory ? '目录' : '文件'} · {entry.name}</span><span>{entry.directory ? '' : formatSize(entry.size)}</span>{!entry.directory && musicDirectory && /\.mp3$/i.test(entry.name) && <button className="song-play" disabled={!ready} onClick={() => void music('music.play', child(path, entry.name))}>播放</button>}{!entry.directory && <button disabled={!ready} onClick={() => { if(window.confirm(`删除设备文件 ${entry.name}？`)) void run(async g => { await g.command('delete', child(path, entry.name)); setEntries(await g.list(path)); }); }}>删除</button>}{entry.directory && <button disabled={!ready} onClick={() => list(child(path, entry.name))}>打开</button>}<button disabled={!ready} onClick={() => void run(async g => { const p = child(path, entry.name); save(entry.directory ? await g.zip(p) : await g.get(p), entry.name + (entry.directory ? '.zip' : '')); })}>接收到电脑{entry.directory ? ' ZIP' : ''}</button></div>)}</div>
