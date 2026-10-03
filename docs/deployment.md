@@ -4,14 +4,16 @@
 - 独立公开仓库：https://github.com/wzddddddddd/esp32s3-link
 - 站点：https://wzddddddddd.github.io/esp32s3-link/
 - 发布分支：`main`
-- 工作流：`Deploy LINK to GitHub Pages`，手动触发。
-- 当前正式入口已连接 Supabase，提供邮箱登录、私有资源存储和设备任务接口。独立演示模式仍使用模拟数据；真实硬件下载与 OTA 尚待固件接入。具体配置和边界见 `supabase.md`。
+- 工作流：`Deploy LINK to GitHub Pages`，推送网站修改到 main 自动发布，也可手动触发。
+- 2026-10-03 正式入口已发布 SD 文件传输和远程音乐控制，文件与音乐数据库扩展、device-gateway 同步更新。真实设备音乐目录读取已验证；OTA 仍未启用。具体配置和边界见 `supabase.md` 与 `file-transfer.md`。
+- 新版提交：`b606656`；发布记录：https://github.com/wzddddddddd/esp32s3-link/actions/runs/37102296508 。
+- 音乐目录显示修复：`acf2530`；自动发布配置：`0a3eea1`。第 5 次发布成功：https://github.com/wzddddddddd/esp32s3-link/actions/runs/37105651741 。目录显示在音乐操作区下方，逐页显示，读取类命令最多等待 90 秒；完成记录可以点击「显示目录」重新打开返回内容。
 
 ## 本地目录与后续更新
 
 日常编辑目录继续使用 `web_wifi/`。独立 GitHub 仓库的本地发布副本位于 `web_wifi/.deploy/repository/`，该目录已被父项目忽略，避免改动原 ESP32 工程的 Git 远程配置或提交历史。
 
-后续发布时，将网站源文件同步到该副本，检查差异后提交并推送，然后手动运行 GitHub Actions 工作流。不要同步 `node_modules/`、`dist/`、`.env`、`.deploy/` 或任何设备/管理员凭证。
+后续发布时，将网站源文件同步到该副本，检查差异后提交并推送。main 的网站代码更新会自动运行 GitHub Actions 工作流。不要同步 `node_modules/`、`dist/`、`.env`、`.deploy/` 或任何设备/管理员凭证。
 
 独立仓库的 `.github/workflows/github-pages.yml` 必须保留；`deployment/github-pages.yml` 是同内容的可复用模板。
 

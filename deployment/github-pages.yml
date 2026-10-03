@@ -2,6 +2,15 @@ name: Deploy LINK to GitHub Pages
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'public/**'
+      - 'index.html'
+      - 'package*.json'
+      - 'vite.config.*'
+      - '.github/workflows/github-pages.yml'
 
 permissions:
   contents: read
