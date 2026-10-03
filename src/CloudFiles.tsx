@@ -7,6 +7,9 @@ import { DirectoryCache } from './cloud/directory-cache';
 import { formatSize } from './demo';
 import './media-workspace.css';
 import StoragePanel from './StoragePanel';
+import OfflineDialog from './OfflineDialog';
+import { deviceOnline as isDeviceOnline, OFFLINE_MESSAGE, offlineError } from './cloud/presence';
+import { usePresenceClock } from './cloud/usePresenceClock';
 import MediaDirectory, { mediaIcons } from './MediaDirectory';
 import { mediaCategories as categories, type MediaCategory } from './media';
 import { CircuitBoard, HardDrive, ChevronDown, Music2, Play, Pause, Square, RefreshCw, Volume2, FolderOpen, ArrowUp, Search, X, Upload, Folder, FolderUp, Plus, Download, History } from 'lucide-react';
@@ -14,6 +17,15 @@ import { CircuitBoard, HardDrive, ChevronDown, Music2, Play, Pause, Square, Refr
 interface FolderHandle { kind: 'directory'; name: string; values(): AsyncIterable<FolderHandle | { kind: 'file'; name: string; getFile(): Promise<File> }> }
 export default function CloudFiles({ client, devices, categoryRoot = '/music', onCategoryChange, onBusyChange }: { client: SupabaseClient; devices: CloudDevice[]; categoryRoot?: string; onCategoryChange?: (root: string) => void; onBusyChange?: (busy: boolean) => void }) {
   const [device, setDevice] = useState(devices[0]?.id || '');
+  const now = usePresenceClock();
+  const [offlinePopup, setOfflinePopup] = useState(false);
+  const latestDevices = useRef(devices); latestDevices.current = devices;
+  const connected = () => navigator.onLine && isDeviceOnline(latestDevices.current.find(item => item.id === device));
+  const deviceOnline = navigator.onLine && isDeviceOnline(devices.find(item => item.id === device), now);
+  function requireConnection() {
+    if (connected()) return true;
+    setOfflinePopup(true); setError(OFFLINE_MESSAGE); return false;
+  }
   const [category, setCategory] = useState<MediaCategory>(categories.find(item => item.root === categoryRoot) ?? categories[0]);
   const [search, setSearch] = useState('');
   const [path, setPath] = useState(categoryRoot), [entries, setEntries] = useState<Entry[]>([]);
@@ -41,7 +53,7 @@ export default function CloudFiles({ client, devices, categoryRoot = '/music', o
       // Observe actual playback independently, so a second cloud round trip
       // never locks the controls after the device accepted a command.
       const observation = new AbortController(); musicObservation.current = observation;
-      const observer = new FilesGateway(client, device, observation.signal, () => {});
+      const observer = new FilesGateway(client, device, observation.signal, () => {}, connected);
       void observer.command('music.status', '/').then(state => {
         if (!observation.signal.aborted) showMusicState(state);
       }).catch(e => { if (!observation.signal.aborted) setError(String(e instanceof Error ? e.message : e)); });
@@ -49,6 +61,17 @@ export default function CloudFiles({ client, devices, categoryRoot = '/music', o
     }, true);
   }
   const active = useRef<AbortController | null>(null), input = useRef<HTMLInputElement>(null), folderInput = useRef<HTMLInputElement>(null), directoryPanel = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (deviceOnline) return;
+    const interrupted = !!active.current || !!directoryReads.current.pending;
+    active.current?.abort(new Error(OFFLINE_MESSAGE)); musicObservation.current?.abort();
+    const pending = directoryReads.current.pending;
+    directoryReads.current.begin(); setWaitingDirectory(null); setMoreDirectory(null);
+    directoryCache.current.invalidate(device);
+    setDirectoryState(current => current === 'waiting' || current === 'loading' ? 'idle' : current);
+    if (pending) void client.rpc('link_cancel_command', { p_id: pending.command.id }).abortSignal(AbortSignal.timeout(5000)).then(() => {}, () => {});
+    if (interrupted) { setError(OFFLINE_MESSAGE); setMessage('设备已断开，本次等待已停止。'); }
+  }, [deviceOnline, device, client]);
   useEffect(() => () => { directoryReads.current.begin(); active.current?.abort(); musicObservation.current?.abort(); }, []);
   useEffect(() => {
     musicObservation.current?.abort(); active.current?.abort();
@@ -123,18 +146,21 @@ export default function CloudFiles({ client, devices, categoryRoot = '/music', o
     return request;
   }
   async function run(action: (g: FilesGateway) => Promise<void | string>, preserveDirectory = false) {
+    if (device && !requireConnection()) return;
     if (active.current || !device) return;
     if (!preserveDirectory) { discardDirectory(); directoryCache.current.invalidate(device); }
     const controller = new AbortController(); active.current = controller;
     setBusy(true); setError(''); setMessage('正在提交…');
-    try { const result = await action(new FilesGateway(client, device, controller.signal, text => { if(!controller.signal.aborted) setMessage(text); })); controller.signal.throwIfAborted(); setMessage(result || '设备已返回结果；播放命令以实际状态为准'); }
+    try { const result = await action(new FilesGateway(client, device, controller.signal, text => { if(!controller.signal.aborted) setMessage(text); }, connected)); controller.signal.throwIfAborted(); setMessage(result || '设备已返回结果；播放命令以实际状态为准'); }
     catch(e) { if(!controller.signal.aborted) {
-      if (e instanceof DirectoryPendingError && directoryReads.current.pending?.command.id === e.id) setMessage('设备返回较慢，目录请求仍在处理；结果返回后会自动显示。其他按钮已可使用。');
+      if (offlineError(e)) { setOfflinePopup(true); setMessage('本次操作未完成。'); setError(OFFLINE_MESSAGE); }
+      else if (e instanceof DirectoryPendingError && directoryReads.current.pending?.command.id === e.id) setMessage('设备返回较慢，目录请求仍在处理；结果返回后会自动显示。其他按钮已可使用。');
       else { setMessage('本次操作未完成，请查看下方提示和任务记录。'); setError(e && typeof e === 'object' && 'message' in e ? String(e.message) : String(e)); }
     } }
     finally { if(active.current === controller) { active.current = null; setBusy(false); } }
   }
   function list(target: string, firstPage?: Record<string, unknown>, force = true) {
+    if (device && !requireConnection()) return;
     if (active.current || !device) return;
     if (category.root !== '/' && target !== category.root && !target.startsWith(category.root + '/')) {
       const next = categories.find(item => item.root !== '/' && (target === item.root || target.startsWith(item.root + '/'))) ?? categories.at(-1)!;
@@ -202,6 +228,7 @@ export default function CloudFiles({ client, devices, categoryRoot = '/music', o
     });
   }
   async function uploadFolder() {
+    if (!requireConnection()) return;
     const picker = (window as unknown as { showDirectoryPicker?: () => Promise<FolderHandle> }).showDirectoryPicker;
     if (!picker) { folderInput.current?.click(); return; }
     try {
@@ -228,11 +255,11 @@ export default function CloudFiles({ client, devices, categoryRoot = '/music', o
   const sd = selectedDevice?.storage?.sd;
   const total = sd?.status === 'ready' ? sd.total : selectedDevice?.capacity_bytes || 0;
   const used = sd?.status === 'ready' ? sd.used || 0 : selectedDevice?.used_bytes || 0;
-  const deviceOnline = !!selectedDevice?.last_seen && Date.now() - Date.parse(selectedDevice.last_seen) < 90000;
   return <section className={`media-workspace theme-${category.kind}`}>
+    <OfflineDialog open={offlinePopup} onClose={() => setOfflinePopup(false)} />
     <div className="media-device-bar">
       <div className="media-device-select"><span className="media-device-icon"><CircuitBoard size={23} /></span><label>当前设备<select aria-label="目标设备" disabled={busy} value={device} onChange={e => { discardDirectory(); musicObservation.current?.abort(); setDevice(e.target.value); setPath(category.root); setEntries([]); setDirectoryState('idle'); setMusicStatus('尚未读取'); }}>{!devices.length && <option value="">请先登记设备</option>}{devices.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}</select></label></div>
-      <span className={`media-connection ${deviceOnline ? 'is-online' : ''}`}><span />{deviceOnline ? '设备在线' : '等待设备联网'}</span>
+      <span className={`media-connection ${deviceOnline ? 'is-online' : ''}`}><span />{deviceOnline ? '设备在线' : 'Wi-Fi 未连接'}</span>
       <div className="media-sd-summary"><HardDrive size={18} /><div><span>{total ? `SD 卡剩余 ${formatSize(Math.max(0, total - used))}` : '等待 SD 卡容量回报'}</span>{total > 0 && <progress aria-label="SD 卡使用率" value={Math.min(used, total)} max={total} />}</div></div>
     </div>
     <details className="media-capacity"><summary><HardDrive size={15} />查看分区与运行内存<ChevronDown size={15} /></summary><StoragePanel storage={selectedDevice?.storage} /></details>
@@ -248,10 +275,10 @@ export default function CloudFiles({ client, devices, categoryRoot = '/music', o
       {(message || error || busy || waitingDirectory) && <section className="media-feedback" aria-live="polite">{message && <p role="status">{busy && <RefreshCw className="media-spinner" size={15} />}{message}</p>}{error && <p role="alert" className="cloud-error">{error}</p>}{busy && <button onClick={() => { discardDirectory(); active.current?.abort(); setDirectoryState(current => current === 'loading' ? 'idle' : current); setMessage('已停止等待和后续任务；设备已领取的任务可能继续，请看记录。'); }}>停止后续任务</button>}{waitingDirectory && <p>正在等待 {waitingDirectory.command.path}<button disabled={busy} onClick={() => { discardDirectory(); setMessage('已取消目录结果的自动显示。'); }}>取消等待</button></p>}</section>}
     </div>
     <aside className="media-tools">
-      <section className="media-send-panel"><div className="media-aside-heading"><Upload size={19} /><h2>发送到设备</h2></div><p>将电脑里的{category.label === '全部文件' ? '文件' : category.label}存到当前目录</p><button className="media-upload-zone" disabled={!ready} onClick={() => input.current?.click()}><span><Upload size={24} /></span><strong>选择{category.kind === 'file' ? '' : category.label}文件</strong><small>{category.format} · 单文件 ≤ 50 MiB</small></button><div className="media-upload-target"><Folder size={15} /><span title={path}>{path}</span></div><button className="media-folder-send" disabled={!ready} onClick={() => void uploadFolder()}><FolderUp size={16} />发送整个文件夹</button><label className="media-overwrite"><input type="checkbox" disabled={busy} checked={overwrite} onChange={e => setOverwrite(e.target.checked)} />覆盖设备上的同名文件</label><p className="media-format-note">{category.kind === 'video' ? '设备支持指定编码的 AVI / MJPEG。MP4 上传后不会自动转码。' : category.kind === 'novel' ? '推荐 UTF-8 TXT。上传后在设备的小说页面阅读。' : category.kind === 'music' ? '设备播放支持 MP3。发送成功后可在歌曲旁点击播放。' : '文件保存成功后，可在设备中访问。'}</p></section>
+      <section className="media-send-panel"><div className="media-aside-heading"><Upload size={19} /><h2>发送到设备</h2></div><p>将电脑里的{category.label === '全部文件' ? '文件' : category.label}存到当前目录</p><button className="media-upload-zone" disabled={!ready} onClick={() => { if (requireConnection()) input.current?.click(); }}><span><Upload size={24} /></span><strong>选择{category.kind === 'file' ? '' : category.label}文件</strong><small>{category.format} · 单文件 ≤ 50 MiB</small></button><div className="media-upload-target"><Folder size={15} /><span title={path}>{path}</span></div><button className="media-folder-send" disabled={!ready} onClick={() => void uploadFolder()}><FolderUp size={16} />发送整个文件夹</button><label className="media-overwrite"><input type="checkbox" disabled={busy} checked={overwrite} onChange={e => setOverwrite(e.target.checked)} />覆盖设备上的同名文件</label><p className="media-format-note">{category.kind === 'video' ? '设备支持指定编码的 AVI / MJPEG。MP4 上传后不会自动转码。' : category.kind === 'novel' ? '推荐 UTF-8 TXT。上传后在设备的小说页面阅读。' : category.kind === 'music' ? '设备播放支持 MP3。发送成功后可在歌曲旁点击播放。' : '文件保存成功后，可在设备中访问。'}</p></section>
       <section className="media-organize"><h2>文件夹工具</h2><label>新文件夹名称<input aria-label="新目录名称" placeholder="例如：我的收藏" value={name} onChange={e => setName(e.target.value)} /></label><button disabled={!ready || !name} onClick={() => void run(async g => { await g.command('mkdir', child(path, name)); setEntries(await g.list(path)); setName(''); })}><Plus size={15} />创建文件夹</button><button disabled={!ready} onClick={() => void run(async g => save(await g.zip(path), (path.split('/').pop() || 'sdcard') + '.zip'))}><Download size={15} />接收当前目录 ZIP</button><small>目录下载最多 150 MiB，保留原有文件层级。</small></section>
     </aside>
-    <section className="media-activity"><div className="media-aside-heading"><History size={18} /><h2>最近操作</h2><span>{jobs.length ? `${jobs.length} 条记录` : '暂无记录'}</span></div><p>设备离线时任务会等待，执行结果以设备回报为准。</p><div className="media-job-list">{jobs.length === 0 && <span className="media-no-jobs">发送文件或读取目录后，记录会显示在这里。</span>}{jobs.map(job => <div key={job.id} className="media-job"><span className={`media-job-dot ${job.status}`} /><div><strong>{({list:'读取目录', 'music.list':'读取音乐', put:'发送文件', get:'接收文件', mkdir:'创建文件夹', delete:'删除文件'} as Record<string, string>)[job.op] || job.op}</strong><span title={job.path}>{job.path}</span></div><span className={`media-job-state ${job.status}`}>{({ waiting: '等待设备', running: '执行中', completed: '已完成', failed: '失败', cancelled: '已取消' } as Record<string, string>)[job.status]}{job.error && `：${job.error}`}</span>{(job.op === 'list' || job.op === 'music.list') && job.cursor === 0 && job.status === 'completed' && job.result && <button disabled={!ready} onClick={() => list(job.op === 'music.list' ? '/music' : job.path, job.result!)}>显示目录</button>}{job.status === 'waiting' && <button disabled={busy} onClick={() => void run(async () => { const r = await client.rpc('link_cancel_command', { p_id: job.id }); if (r.error) throw r.error; })}>取消排队</button>}{job.op === 'get' && job.status === 'completed' && <button disabled={!ready} onClick={() => void run(async g => save(await g.resource(String(job.result?.resource_id)), job.path.split('/').pop() || 'file'))}>下载文件</button>}</div>)}</div></section>
+    <section className="media-activity"><div className="media-aside-heading"><History size={18} /><h2>最近操作</h2><span>{jobs.length ? `${jobs.length} 条记录` : '暂无记录'}</span></div><p>离线操作不入队。断开后取消未领取的任务，已执行的操作以设备回报为准。</p><div className="media-job-list">{jobs.length === 0 && <span className="media-no-jobs">发送文件或读取目录后，记录会显示在这里。</span>}{jobs.map(job => <div key={job.id} className="media-job"><span className={`media-job-dot ${job.status}`} /><div><strong>{({list:'读取目录', 'music.list':'读取音乐', put:'发送文件', get:'接收文件', mkdir:'创建文件夹', delete:'删除文件'} as Record<string, string>)[job.op] || job.op}</strong><span title={job.path}>{job.path}</span></div><span className={`media-job-state ${job.status}`}>{({ waiting: '等待设备', running: '执行中', completed: '已完成', failed: '失败', cancelled: '已取消' } as Record<string, string>)[job.status]}{job.error && `：${job.error}`}</span>{(job.op === 'list' || job.op === 'music.list') && job.cursor === 0 && job.status === 'completed' && job.result && <button disabled={!ready} onClick={() => list(job.op === 'music.list' ? '/music' : job.path, job.result!)}>显示目录</button>}{job.status === 'waiting' && <button disabled={busy} onClick={() => void run(async () => { const r = await client.rpc('link_cancel_command', { p_id: job.id }); if (r.error) throw r.error; })}>取消排队</button>}{job.op === 'get' && job.status === 'completed' && <button disabled={!ready} onClick={() => void run(async g => save(await g.resource(String(job.result?.resource_id)), job.path.split('/').pop() || 'file'))}>下载文件</button>}</div>)}</div></section>
     <input hidden type="file" multiple accept={category.accept || undefined} ref={input} onChange={e => { void uploadFiles(Array.from(e.target.files || []), false); e.target.value = ''; }} />
     <input hidden type="file" multiple ref={folderInput} {...({ webkitdirectory: '' } as Record<string, string>)} onChange={e => { void uploadFiles(Array.from(e.target.files || []), true); e.target.value = ''; }} />
   </section>;

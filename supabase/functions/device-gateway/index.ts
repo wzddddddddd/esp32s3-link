@@ -20,16 +20,23 @@ Deno.serve(async request => {
       const auth = await client.rpc('link_device_session', { p_device_id: id, p_token: token });
       if (auth.error || auth.data !== true) return respond({ error: 'UNAUTHORIZED' }, 401);
       const { socket, response } = Deno.upgradeWebSocket(request);
+      const session = crypto.randomUUID();
+      const presence = async (event: 'open' | 'renew' | 'close') => {
+        const result = await client.rpc('link_device_presence', { p_device_id: id, p_token: token, p_event: event, p_session: session });
+        if (result.error || (event !== 'close' && result.data !== true)) throw new Error('PRESENCE_UNAVAILABLE');
+      };
       attachDeviceSocket(socket, input => executeRequest(client, id, token, input), wake => {
         const channel = client.channel(`device-wake-${id}-${crypto.randomUUID()}`)
           .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'link_commands', filter: `device_id=eq.${id}` }, wake)
           .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'link_tasks', filter: `device_id=eq.${id}` }, wake)
           .subscribe(status => { if (status === 'SUBSCRIBED') wake(); });
         return () => { void client.removeChannel(channel); };
-      });
+      }, presence);
       return response;
     }
     const input = parseRequest(await request.text());
+    const presence = await client.rpc('link_device_presence', { p_device_id: id, p_token: token, p_event: 'http', p_session: null });
+    if (presence.error) return respond({ error: 'UNAUTHORIZED' }, 401);
     const reply = await executeRequest(client, id, token, input);
     return respond(reply.body, reply.status);
   } catch (e) {

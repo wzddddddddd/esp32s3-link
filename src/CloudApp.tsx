@@ -26,6 +26,9 @@ import StoragePanel from './StoragePanel';
 import { mediaCategories, fileCategory } from './media';
 import { mediaIcons } from './MediaDirectory';
 import './studio.css';
+import OfflineDialog from './OfflineDialog';
+import { deviceOnline, OFFLINE_MESSAGE, offlineError, mergePresence } from './cloud/presence';
+import { usePresenceClock } from './cloud/usePresenceClock';
 
 const labels = {
   devices: "设备与存储",
@@ -50,6 +53,8 @@ export default function CloudApp({
   onDemo: () => void;
 }) {
   const [session, setSession] = useState<Session | null>(null);
+  const now = usePresenceClock();
+  const [offlinePopup, setOfflinePopup] = useState(false);
   const [authReady, setAuthReady] = useState(false);
   const [email, setEmail] = useState("");
   const [view, setView] = useState<View>("devices");
@@ -111,7 +116,7 @@ export default function CloudApp({
     const state = await snapshot(client);
     if (sequence !== syncSequence.current || owner !== sessionUser.current)
       return;
-    setDevices(state.devices);
+    setDevices(current => state.devices.map(row => mergePresence(current.find(item => item.id === row.id) ?? row, row)));
     setResources(state.resources);
     setTasks(state.tasks);
     setLastSync(new Date().toLocaleTimeString("zh-CN"));
@@ -142,12 +147,25 @@ export default function CloudApp({
         if (!live) return;
         const row = payload.new as CloudDevice & { owner_id: string };
         if (row.owner_id !== session.user.id) return;
-        setDevices(current => current.map(item => item.id === row.id ? { ...item, ...row } : item));
+        setDevices(current => current.map(item => item.id === row.id ? mergePresence(item, row) : item));
       }).subscribe();
+    let pollingPresence = false;
+    const presenceAbort = new AbortController();
+    const presencePoll = setInterval(() => {
+      if (!live || document.hidden || pollingPresence) return;
+      pollingPresence = true;
+      void client.from('link_devices').select('id,wifi_connected,presence_seen')
+        .abortSignal(AbortSignal.any([presenceAbort.signal, AbortSignal.timeout(3000)])).then(result => {
+        if (!live || result.error) return;
+        setDevices(current => current.map(item => mergePresence(item, result.data?.find(row => row.id === item.id) ?? {})));
+      }).then(() => { pollingPresence = false; }, () => { pollingPresence = false; });
+    }, 3000);
     const timer = setInterval(() => void tick(), 15000);
     return () => {
       live = false;
       clearInterval(timer);
+      clearInterval(presencePoll);
+      presenceAbort.abort();
       void client.removeChannel(deviceUpdates).catch(() => {});
     };
   }, [session?.user.id, client]);
@@ -175,7 +193,8 @@ export default function CloudApp({
     try {
       await action();
     } catch (e) {
-      setError(errorText(e));
+      if (offlineError(e)) { setOfflinePopup(true); setError(OFFLINE_MESSAGE); }
+      else setError(errorText(e));
     } finally {
       acting.current = false;
       setBusy("");
@@ -219,8 +238,11 @@ export default function CloudApp({
   }
   const device = devices.find((d) => d.id === target);
   const resource = resources.find((r) => r.id === resourceId);
-  const online = (d: CloudDevice) =>
-    !!d.last_seen && Date.now() - new Date(d.last_seen).getTime() < 90000;
+  const online = (d: CloudDevice) => navigator.onLine && deviceOnline(d, now);
+  function requireConnection() {
+    if (device && navigator.onLine && deviceOnline(device)) return true;
+    setOfflinePopup(true); setError(OFFLINE_MESSAGE); return false;
+  }
   if (!authReady) return <div className="cloud-loading">正在检查登录状态…</div>;
   if (!session)
     return (
@@ -277,6 +299,7 @@ export default function CloudApp({
     );
   return (
     <div className="cloud-console">
+      <OfflineDialog open={offlinePopup} onClose={() => setOfflinePopup(false)} />
       <header className="cloud-header">
         <a className="brand" href="#">
           <span className="brand-mark">
@@ -589,14 +612,14 @@ export default function CloudApp({
                 允许替换设备上的同名文件
               </label>
               <p className="inline-note">
-                任务创建后等待设备领取。设备离线时会保留任务；网页不会自行推进下载进度。
+                仅在设备 Wi-Fi 在线时发送；离线操作不会创建任务。
               </p>
               <button
                 className="button primary"
                 disabled={
                   !!busy || !device || !resource || !["image", "text"].includes(resource.kind) || resource.size_bytes === 0
                 }
-                onClick={() => setConfirm(true)}
+                onClick={() => { if (requireConnection()) setConfirm(true); }}
               >
                 <Send size={17} /> 确认发送
               </button>
@@ -732,7 +755,7 @@ export default function CloudApp({
           将「{resource?.name}」发送给「{device?.name}」。同名文件：
           {overwrite ? "允许覆盖" : "禁止覆盖"}。
         </p>
-        <p className="muted">会创建真实云端任务，设备配置完成并联网后执行。</p>
+        <p className="muted">发送前会再次检查设备联网状态，离线时不创建任务。</p>
         {error && (
           <p className="validation-message" role="alert">
             {error}
@@ -751,6 +774,7 @@ export default function CloudApp({
             disabled={!!busy || !device || !resource}
             onClick={() =>
               void run("创建任务", async () => {
+                if (!requireConnection()) return;
                 const result = await client.rpc("link_create_task", {
                   p_device_id: target,
                   p_resource_id: resourceId,

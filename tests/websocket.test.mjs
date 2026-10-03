@@ -34,6 +34,16 @@ test('device socket serializes requests, pushes wakeups and cleans subscriptions
     const unauthorized={readyState:1,send(){},close(){this.readyState=3;}};
     attachDeviceSocket(unauthorized,async()=>({status:401,body:{error:'UNAUTHORIZED'}}),()=>()=>{});
     unauthorized.onmessage({data:'{"id":1,"action":"command_claim"}'});await flush();assert.equal(unauthorized.readyState,3);
+    const events=[];
+    let unblock;
+    const liveSocket={readyState:1,send(){},close(){this.readyState=3;this.onclose?.();}};
+    attachDeviceSocket(liveSocket,async()=>{await new Promise(resolve=>{unblock=resolve;});return {status:200,body:{}};},()=>()=>{},async event=>{events.push(event);});
+    liveSocket.onopen();await flush();assert.deepEqual(events,['open']);
+    liveSocket.onmessage({data:'{"id":1,"action":"command_claim"}'});await flush();
+    liveSocket.onmessage({data:'{"type":"presence"}'});await flush();
+    assert.deepEqual(events,['open','renew','renew'],'presence bypasses a blocked business request');
+    liveSocket.close();await flush();assert.equal(events.at(-1),'close');
+    unblock();await flush();
     let args;
     const reply=await executeRequest({rpc:async(_rpc,p)=>{args=p;return {error:{code:'28000',message:'secret SQL'}};}},'device','token',{action:'command_claim'});
     assert.equal(args.p_token,'token');assert.deepEqual(reply,{status:401,body:{error:'UNAUTHORIZED'}});

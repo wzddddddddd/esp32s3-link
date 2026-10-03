@@ -13,6 +13,8 @@ export interface CloudDevice {
   used_bytes: number;
   storage?: StorageSnapshot | null;
   last_seen: string | null;
+  wifi_connected?: boolean;
+  presence_seen?: string | null;
   files: { name: string; size: number }[];
 }
 export interface CloudResource {
@@ -92,7 +94,7 @@ export async function snapshot(client: SupabaseClient) {
       .select(columns).returns<CloudDevice[]>().order("created_at", { ascending: false });
   const legacyColumns = "id,name,hardware,firmware_version,capacity_bytes,used_bytes,last_seen,files";
   const devices = async () => {
-    const result = await deviceQuery(`${legacyColumns},storage`);
+    const result = await deviceQuery(`${legacyColumns},storage,wifi_connected,presence_seen`);
     // Keep the current website usable while the capacity migration is pending.
     if (result.error?.code === '42703' && result.error.message.includes('storage')) return deviceQuery(legacyColumns);
     return result;

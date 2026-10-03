@@ -48,18 +48,21 @@ interface DeviceSocket {
 }
 export function attachDeviceSocket(socket: DeviceSocket,
     execute: (input: GatewayRequest) => Promise<GatewayReply>,
-    subscribe: (wake: () => void) => () => void) {
+    subscribe: (wake: () => void) => () => void,
+    presence?: (event: 'open' | 'renew' | 'close') => Promise<void>) {
   let disposed = false, queued = 0, chain = Promise.resolve();
   let unsubscribe = () => {};
   let safety: ReturnType<typeof setInterval> | undefined;
   let rotation: ReturnType<typeof setTimeout> | undefined;
+  let renewing = false;
   const send = (body: unknown) => { if (!disposed && socket.readyState === 1) socket.send(JSON.stringify(body)); };
   const wake = () => send({ type: 'wake' });
   const cleanup = () => {
     if (disposed) return;
     disposed = true; unsubscribe(); clearInterval(safety); clearTimeout(rotation);
+    if (presence) void presence('close').catch(() => {});
   };
-  socket.onopen = () => {
+  const opened = () => {
     if (disposed) return;
     unsubscribe = subscribe(wake);
     send({ type: 'ready' }); wake();
@@ -70,11 +73,27 @@ export function attachDeviceSocket(socket: DeviceSocket,
     // claims any pending command, so updates during rotation are not lost.
     rotation = setTimeout(() => { cleanup(); socket.close(1000, 'session rotation'); }, 110000);
   };
+  socket.onopen = () => {
+    if (!presence) { opened(); return; }
+    void presence('open').then(() => {
+      if (disposed) { void presence('close').catch(() => {}); return; }
+      opened();
+    }).catch(() => { cleanup(); socket.close(1011, 'presence unavailable'); });
+  };
   socket.onmessage = event => {
     if (disposed) return;
     let input: GatewayRequest, id: number;
     try {
       if (typeof event.data !== 'string') throw new Error('INVALID_REQUEST');
+      if (event.data.length > 65536) throw new Error('PAYLOAD_TOO_LARGE');
+      const raw = JSON.parse(event.data);
+      if (raw?.type === 'presence' && presence) {
+        if (!renewing) {
+          renewing = true;
+          void presence('renew').catch(() => { cleanup(); socket.close(1011, 'presence unavailable'); }).finally(() => { renewing = false; });
+        }
+        return;
+      }
       input = parseRequest(event.data);
       id = JSON.parse(event.data).id;
       if (!Number.isSafeInteger(id) || id < 1 || id > 2147483647) throw new Error('INVALID_REQUEST');
@@ -84,6 +103,8 @@ export function attachDeviceSocket(socket: DeviceSocket,
     chain = chain.then(async () => {
       if (disposed) return;
       try {
+        if (presence) await presence('renew');
+        if (disposed) return;
         const reply = await execute(input);
         send({ id, ...reply });
         if (reply.status === 401) { cleanup(); socket.close(1008, 'unauthorized'); }

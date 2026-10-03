@@ -58,9 +58,13 @@ class CommandStream {
   }
 }
 export class FilesGateway {
-  constructor(private client: SupabaseClient, private device: string, private signal: AbortSignal, private progress: (message: string) => void) {}
-  async command(op: string, path: string, extra: Record<string, unknown> = {}) {
+  constructor(private client: SupabaseClient, private device: string, private signal: AbortSignal, private progress: (message: string) => void, private online?: () => boolean) {}
+  private requireOnline() {
     check(this.signal);
+    if (this.online && !this.online()) throw new Error('Wi-Fi 未连接，请先让设备连接 Wi-Fi 后再操作。');
+  }
+  async command(op: string, path: string, extra: Record<string, unknown> = {}) {
+    this.requireOnline();
     const business = op.startsWith('music.') || op === 'delete' || op === 'capabilities';
     const transfer = op === 'put' || op === 'get';
     const timeoutMs = transfer ? 30 * 60 * 1000 : 90 * 1000;
@@ -79,6 +83,7 @@ export class FilesGateway {
       id = queued.data;
       stream.id = id;
       while (true) {
+        this.requireOnline();
         check(signal);
         const observed = stream.version;
         const cached = stream.latest;
@@ -143,7 +148,7 @@ export class FilesGateway {
     }
   }
   async put(file: File, path: string, overwrite: boolean) {
-    check(this.signal);
+    this.requireOnline();
     if (file.size > MAX_FILE || new TextEncoder().encode(file.name).length > 120) throw new Error('单文件最多 50 MiB，名称最多 120 UTF-8 字节');
     this.progress('校验并上传云端：' + path);
     const hash = await sha256(file); check(this.signal);
