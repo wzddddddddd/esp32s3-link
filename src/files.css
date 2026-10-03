@@ -9,3 +9,6 @@
 .file-list { display: grid; gap: 8px; }
 .file-list > div { display: flex; gap: 12px; padding: 14px; border: 1px solid var(--line); align-items: center; flex-wrap: wrap; border-radius: 8px; }
 .file-list span:first-child { flex: 1 1 220px; overflow-wrap: anywhere; }
+.directory-panel { border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+.directory-panel > p { margin: 0 0 12px; }
+.file-manager .song-play { background: var(--accent, #a3e635); color: #101510; font-weight: 700; }

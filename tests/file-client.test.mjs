@@ -4,7 +4,7 @@ import { readFile, writeFile, unlink } from 'node:fs/promises';
 import ts from 'typescript';
 import JSZip from 'jszip';
 
-test('browser transfer checks hashes, walks paginated directories and preserves ZIP hierarchy', async () => {
+test('browser transfer checks hashes, walks paginated directories and preserves ZIP hierarchy', async t => {
   const compiled = new URL(`./.file-client-${process.pid}.mjs`, import.meta.url);
   await writeFile(compiled, ts.transpileModule(await readFile(new URL('../src/cloud/files.ts', import.meta.url), 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText);
   try {
@@ -15,6 +15,18 @@ test('browser transfer checks hashes, walks paginated directories and preserves 
     let calls = 0;
     g.command = async (_op, _path, args) => { calls++; return args.p_cursor === 0 ? {entries:[{name:'a.txt',size:3,directory:false}],cursor:1,end:false} : {entries:[],cursor:1,end:true}; };
     assert.equal((await g.list('/')).length,1); assert.equal(calls,2);
+    const pages = [];
+    g.command = async (_op, _path, args) => {
+      if (args.p_cursor === 0) return {entries:[{name:'song.mp3',size:3,directory:false}],cursor:1,end:false};
+      throw new Error('second page unavailable');
+    };
+    await assert.rejects(g.list('/music', (items, complete) => pages.push({items,complete})), /second page/);
+    assert.equal(pages[0].items[0].name, 'song.mp3');
+    assert.equal(pages[0].complete, false);
+    g.command = async () => { throw new Error('must not queue a completed directory again'); };
+    assert.equal((await g.list('/music', undefined, {entries:[{name:'song.mp3',size:3,directory:false}],cursor:1,end:true})).length,1);
+    g.command = async (_op, _path, args) => { assert.equal(args.p_cursor,1); return {entries:[],cursor:1,end:true}; };
+    assert.equal((await g.list('/music', undefined, {entries:[{name:'song.mp3',size:3,directory:false}],cursor:1,end:false})).length,1);
     g.command = async () => ({entries:[],cursor:0,end:false}); await assert.rejects(g.list('/'),/游标/);
     const content = new Blob(['abc']);
     g.list = async p => p === '/' ? [{name:'empty',size:0,directory:true},{name:'novels',size:0,directory:true}] : p === '/novels' ? [{name:'中文.txt',size:3,directory:false}] : [];
@@ -36,9 +48,10 @@ test('browser transfer checks hashes, walks paginated directories and preserves 
     } finally { globalThis.fetch = fetchBefore; }
     const cancelled = new AbortController(); cancelled.abort();
     const sent = [];
+    const reply = data => Object.assign(Promise.resolve({data}), {abortSignal: () => Promise.resolve({data})});
     const dispatcher = new FilesGateway({
-      rpc: async (name, args) => { sent.push({name,args}); return {data:'command-id'}; },
-      from: () => ({select: () => ({eq: () => ({single: async () => ({data:{status:'completed',result:{state:'Playing',completion:'accepted'}}})})})})
+      rpc: (name, args) => { sent.push({name,args}); return reply('command-id'); },
+      from: () => ({select: () => ({eq: () => ({abortSignal: () => ({single: () => reply({status:'completed',result:{state:'Playing',completion:'accepted'}})})})})})
     }, 'device', new AbortController().signal, () => {});
     await dispatcher.command('music.volume', '/', {volume:42});
     assert.equal(sent[0].name,'link_queue_remote');
@@ -50,5 +63,14 @@ test('browser transfer checks hashes, walks paginated directories and preserves 
     assert.equal(sent[2].args.p_cursor,8);
     const stopped = new FilesGateway({},'device',cancelled.signal,()=>{});
     await assert.rejects(stopped.command('get','/x'));
+    // A hung network response must time out too, rather than bypassing the
+    // directory deadline and keeping every button disabled indefinitely.
+    t.mock.timers.enable({apis:['setTimeout']});
+    const hang = {abortSignal: signal => new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), {once:true}))};
+    const timed = new FilesGateway({rpc: () => hang}, 'device', new AbortController().signal, () => {});
+    const timeoutCheck = assert.rejects(timed.command('list','/music'), /90 秒/);
+    t.mock.timers.tick(90000);
+    await timeoutCheck;
+    t.mock.timers.reset();
   } finally { await unlink(compiled); }
 });

@@ -2,7 +2,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import JSZip from 'jszip';
 
 export interface Entry { name: string; size: number; directory: boolean }
-export interface Command { id: string; op: string; path: string; status: string; error: string | null; result: Record<string, unknown> | null }
+export interface Command { id: string; op: string; path: string; cursor: number; status: string; error: string | null; result: Record<string, unknown> | null }
 const MAX_FILE = 50 * 1024 * 1024;
 export function child(parent: string, name: string) {
   if (!name || name === '.' || name === '..' || /[\\/\x00-\x1f:*?"<>|]/.test(name) || /[. ]$/.test(name)) throw new Error('文件名不受 SD 卡支持：' + name);
@@ -27,41 +27,55 @@ export class FilesGateway {
   async command(op: string, path: string, extra: Record<string, unknown> = {}) {
     check(this.signal);
     const business = op.startsWith('music.') || op === 'delete' || op === 'capabilities';
-    const queued = await this.client.rpc(business ? 'link_queue_remote' : 'link_queue_command', business ? { p_device_id: this.device, p_op: op, p_path: path, p_args: extra } : { p_device_id: this.device, p_op: op, p_path: path, ...extra });
-    if (queued.error) throw queued.error;
-    const id = String(queued.data);
+    const transfer = op === 'put' || op === 'get';
+    const timeoutMs = transfer ? 30 * 60 * 1000 : 90 * 1000;
+    const timeout = new AbortController();
+    const signal = AbortSignal.any([this.signal, timeout.signal]);
+    const timer = setTimeout(() => timeout.abort(new Error(transfer ? '文件传输等待超过 30 分钟，请查看任务记录。' : '设备 90 秒内未返回结果。请检查设备 Wi-Fi 云端状态或前面的任务，再重试。')), timeoutMs);
+    let id: string | undefined;
+    const started = Date.now();
     try {
-      const deadline = Date.now() + 30 * 60 * 1000;
+      const queued = await this.client.rpc(business ? 'link_queue_remote' : 'link_queue_command', business ? { p_device_id: this.device, p_op: op, p_path: path, p_args: extra } : { p_device_id: this.device, p_op: op, p_path: path, ...extra }).abortSignal(signal);
+      check(signal);
+      if (queued.error) throw queued.error;
+      id = String(queued.data);
       while (true) {
-        check(this.signal);
-        const reply = await this.client.from('link_commands').select('*').eq('id', id).single();
+        check(signal);
+        const reply = await this.client.from('link_commands').select('*').eq('id', id).abortSignal(signal).single();
+        check(signal);
         if (reply.error) throw reply.error;
         const command = reply.data as Command;
-        this.progress(`${path} · ${command.status === 'waiting' ? '等待设备联网领取' : command.status === 'running' ? '设备执行中' : command.status}`);
+        this.progress(`${path} · ${command.status === 'waiting' ? '已提交，等待设备领取（请保持设备 Wi-Fi 联网）' : command.status === 'running' ? '设备正在读取或执行，等待结果' : command.status === 'completed' ? '设备已返回结果' : command.status} · ${Math.floor((Date.now() - started) / 1000)} 秒`);
         if (command.status === 'completed') return command.result ?? {};
         if (command.status === 'failed' || command.status === 'cancelled') throw new Error(command.error || '任务已取消');
-        if (Date.now() > deadline) throw new Error('等待超过 30 分钟。任务状态以云端记录为准。');
-        await pause(this.signal);
+        await pause(signal);
       }
     } catch (error) {
       // Only unclaimed commands can be cancelled. A device already writing a
       // file must finish/abort safely; never claim a browser abort rolled it back.
-      await this.client.rpc('link_cancel_command', { p_id: id });
-      throw error;
+      // Cleanup must not leave the page locked if the network is unavailable.
+      if (id) void this.client.rpc('link_cancel_command', { p_id: id }).abortSignal(AbortSignal.timeout(5000)).then(() => {}, () => {});
+      throw timeout.signal.aborted ? timeout.signal.reason : error;
+    } finally {
+      clearTimeout(timer);
     }
   }
-  async list(path: string): Promise<Entry[]> {
+  async list(path: string, onPage?: (entries: Entry[], complete: boolean) => void, firstPage?: Record<string, unknown>): Promise<Entry[]> {
     const all: Entry[] = []; let cursor = 0;
     while (true) {
-      const r = await this.command('list', path, { p_cursor: cursor });
+      check(this.signal);
+      const r = firstPage ?? await this.command('list', path, { p_cursor: cursor });
+      firstPage = undefined;
+      check(this.signal);
       if (!Array.isArray(r.entries) || typeof r.end !== 'boolean') throw new Error('设备返回无效目录');
       for (const item of r.entries) {
         if (typeof item.name !== 'string' || typeof item.directory !== 'boolean' || !Number.isSafeInteger(item.size) || item.size < 0) throw new Error('设备目录项无效');
         child(path, item.name); all.push(item as Entry);
       }
       if (all.length > 10000) throw new Error('单目录超过 10000 项');
+      if (!r.end && (!Number.isSafeInteger(r.cursor) || Number(r.cursor) <= cursor)) throw new Error('目录游标无效');
+      onPage?.([...all], r.end);
       if (r.end) return all;
-      if (!Number.isSafeInteger(r.cursor) || Number(r.cursor) <= cursor) throw new Error('目录游标无效');
       cursor = Number(r.cursor);
     }
   }
