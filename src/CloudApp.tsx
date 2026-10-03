@@ -22,14 +22,18 @@ import {
 } from "./cloud/client";
 import { formatSize } from "./demo";
 import CloudFiles from './CloudFiles';
+import StoragePanel from './StoragePanel';
+import { mediaCategories, fileCategory } from './media';
+import { mediaIcons } from './MediaDirectory';
+import './studio.css';
 
 const labels = {
-  devices: "我的设备",
-  resources: "云端资源",
-  send: "发送资源",
-  tasks: "任务记录",
-  ota: "OTA 更新",
-  files: "SD 文件传输",
+  devices: "设备与存储",
+  resources: "云端文件库",
+  send: "发送云端资源",
+  tasks: "传输任务",
+  ota: "固件与升级",
+  files: "设备媒体库",
 };
 type View = keyof typeof labels;
 const errorText = (e: unknown) =>
@@ -60,6 +64,9 @@ export default function CloudApp({
   const [resourceId, setResourceId] = useState("");
   const [overwrite, setOverwrite] = useState(false);
   const [query, setQuery] = useState("");
+  const [mediaRoot, setMediaRoot] = useState('/music');
+  const [mediaBusy, setMediaBusy] = useState(false);
+  const [resourceCategory, setResourceCategory] = useState('all');
   const [deviceName, setDeviceName] = useState("我的 ESP32-S3");
   const [provision, setProvision] = useState<{
     device_id: string;
@@ -130,10 +137,18 @@ export default function CloudApp({
       }
     };
     void tick();
+    const deviceUpdates = client.channel(`device-capacity-${session.user.id}-${crypto.randomUUID()}`)
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'link_devices', filter: `owner_id=eq.${session.user.id}` }, payload => {
+        if (!live) return;
+        const row = payload.new as CloudDevice & { owner_id: string };
+        if (row.owner_id !== session.user.id) return;
+        setDevices(current => current.map(item => item.id === row.id ? { ...item, ...row } : item));
+      }).subscribe();
     const timer = setInterval(() => void tick(), 15000);
     return () => {
       live = false;
       clearInterval(timer);
+      void client.removeChannel(deviceUpdates).catch(() => {});
     };
   }, [session?.user.id, client]);
   useEffect(() => {
@@ -267,9 +282,9 @@ export default function CloudApp({
           <span className="brand-mark">
             <CircuitBoard />
           </span>
-          LINK /
+          LINK <span className="cloud-brand-name">媒体工作台</span>
         </a>
-        <span className="status-pill online">真实云端</span>
+        <span className="status-pill online">私有工作空间</span>
         <span className="cloud-user">{session.user.email}</span>
         <button
           className="text-button"
@@ -286,10 +301,13 @@ export default function CloudApp({
       </header>
       <div className="cloud-body">
         <nav className="cloud-nav" aria-label="云端导航">
+          <div className="cloud-nav-caption">设备</div>
+          <button disabled={mediaBusy} className={`nav-item ${view === 'devices' ? 'active' : ''}`} onClick={() => setView('devices')} aria-current={view === 'devices' ? 'page' : undefined}><CircuitBoard size={18} />设备与存储</button>
+          <div className="cloud-nav-caption">设备内容</div>
+          {mediaCategories.map(item => { const Icon = mediaIcons[item.kind]; return <button key={item.root} disabled={mediaBusy} className={`nav-item ${view === 'files' && mediaRoot === item.root ? 'active' : ''}`} onClick={() => { setMediaRoot(item.root); setView('files'); }} aria-current={view === 'files' && mediaRoot === item.root ? 'page' : undefined}><Icon size={18} />{item.title}</button>; })}
+          <div className="cloud-nav-caption">工作空间</div>
           {(
             [
-              { id: "devices", icon: CircuitBoard },
-              { id: "files", icon: FolderOpen },
               { id: "resources", icon: FolderOpen },
               { id: "send", icon: Send },
               { id: "tasks", icon: ListChecks },
@@ -298,6 +316,7 @@ export default function CloudApp({
           ).map(({ id, icon: Icon }) => (
             <button
               key={id}
+              disabled={mediaBusy}
               className={`nav-item ${view === id ? "active" : ""}`}
               onClick={() => setView(id)}
               aria-current={view === id ? "page" : undefined}
@@ -306,17 +325,17 @@ export default function CloudApp({
               {labels[id]}
             </button>
           ))}
-          <button className="text-button" onClick={onDemo}>
+          <div className="cloud-nav-foot"><span className="cloud-nav-device-dot" />{devices.filter(online).length} 台设备在线<small>通过 Wi-Fi 连接你的设备</small></div>
+          <button className="text-button" disabled={mediaBusy} onClick={onDemo}>
             切换到演示模式
           </button>
         </nav>
         <main className="cloud-main">
           <div className="page-heading">
             <div>
-              <div className="eyebrow">YOUR PRIVATE CLOUD</div>
-              <h1>{labels[view]}</h1>
+              <h1>{view === 'files' ? mediaCategories.find(item => item.root === mediaRoot)?.title : labels[view]}</h1>
               <p>
-                {lastSync
+                {view === 'files' ? mediaCategories.find(item => item.root === mediaRoot)?.help : lastSync
                   ? `最近同步 ${lastSync} · 设备进度由真实回报更新`
                   : "正在连接你的工作空间"}
               </p>
@@ -347,7 +366,7 @@ export default function CloudApp({
               {busy}…
             </div>
           )}
-          {view === "files" && <CloudFiles key={session.user.id} client={client} devices={devices} />}
+          {view === "files" && <CloudFiles key={session.user.id} client={client} devices={devices} categoryRoot={mediaRoot} onCategoryChange={setMediaRoot} onBusyChange={setMediaBusy} />}
           {view === "devices" && (
             <>
               <form
@@ -423,6 +442,8 @@ export default function CloudApp({
                         </dd>
                       </div>
                     </dl>
+                    {d.capacity_bytes > 0 && <div className="device-space"><progress aria-label={`${d.name} SD 卡使用率`} max={d.capacity_bytes} value={d.used_bytes} /><span>已用 {formatSize(d.used_bytes)} / 总量 {formatSize(d.capacity_bytes)}</span></div>}
+                    <details className="device-capacity-detail"><summary>查看 Flash 分区与运行内存</summary><StoragePanel storage={d.storage} /></details>
                     <button
                       className="button"
                       onClick={() => {
@@ -444,6 +465,7 @@ export default function CloudApp({
           )}
           {view === "resources" && (
             <>
+              <nav className="media-category-tabs cloud-resource-filters" aria-label="云端资源分类">{[{ kind: 'all', label: '全部' }, ...mediaCategories.filter(item => item.kind !== 'file')].map(item => <button key={item.kind} aria-pressed={resourceCategory === item.kind} onClick={() => setResourceCategory(item.kind)}>{item.label}</button>)}</nav>
               <input
                 ref={files}
                 className="sr-only"
@@ -472,11 +494,11 @@ export default function CloudApp({
               <div className="resource-list">
                 {resources
                   .filter((r) =>
-                    r.name.toLowerCase().includes(query.toLowerCase()),
+                    r.name.toLowerCase().includes(query.toLowerCase()) && (resourceCategory === 'all' || fileCategory(r.name) === resourceCategory),
                   )
                   .map((r) => (
                     <article className="panel cloud-resource-row" key={r.id}>
-                      <FolderOpen size={24} />
+                      {(() => { const Icon = mediaIcons[fileCategory(r.name) as keyof typeof mediaIcons]; return <Icon size={24} />; })()}
                       <div>
                         <h3>{r.name}</h3>
                         <p className="muted">
@@ -509,6 +531,13 @@ export default function CloudApp({
                     </article>
                   ))}
               </div>
+              {!!resources.length && !resources.some(r => r.name.toLowerCase().includes(query.toLowerCase()) && (resourceCategory === 'all' || fileCategory(r.name) === resourceCategory)) && (
+                <div className="empty-state">
+                  <CloudUpload size={32} />
+                  <h3>没有找到匹配的资源</h3>
+                  <p>切换分类或尝试其他关键词。音乐和视频也可以从对应的设备页面直接上传。</p>
+                </div>
+              )}
               {!resources.length && (
                 <div className="empty-state">
                   <CloudUpload size={32} />

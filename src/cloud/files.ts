@@ -21,13 +21,39 @@ export async function sha256(blob: Blob) {
   return [...new Uint8Array(await crypto.subtle.digest('SHA-256', await blob.arrayBuffer()))].map(b => b.toString(16).padStart(2, '0')).join('');
 }
 function check(signal: AbortSignal) { signal.throwIfAborted(); }
-function pause(signal: AbortSignal) {
-  return new Promise<void>((resolve, reject) => {
-    check(signal);
-    const stop = () => { clearTimeout(timer); reject(new Error('已停止等待；已开始的设备任务可能继续执行，请查看记录')); };
-    const timer = setTimeout(() => { signal.removeEventListener('abort', stop); resolve(); }, 1500);
-    signal.addEventListener('abort', stop, { once: true });
-  });
+class CommandStream {
+  version = 0;
+  id?: string;
+  latest: Command | null = null;
+  private ready = false;
+  private wake: (() => void) | null = null;
+  private channel: ReturnType<SupabaseClient['channel']> | null = null;
+  constructor(private client: SupabaseClient, device: string) {
+    // Unit tests and older adapters may not implement Realtime. Querying is
+    // retained as a bounded recovery path when subscriptions are unavailable.
+    if (typeof client.channel !== 'function') return;
+    this.channel = client.channel(`command-results-${device}-${crypto.randomUUID()}`)
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'link_commands', filter: `device_id=eq.${device}` }, payload => {
+        const row = payload.new as Command;
+        if (row.id !== this.id) return;
+        this.latest = row; this.version++; this.wake?.();
+      }).subscribe(status => { this.ready = status === 'SUBSCRIBED'; this.version++; this.wake?.(); });
+  }
+  wait(signal: AbortSignal, version: number) {
+    return new Promise<void>((resolve, reject) => {
+      check(signal);
+      if (this.version !== version) { resolve(); return; }
+      const finish = () => { clearTimeout(timer); signal.removeEventListener('abort', stop); this.wake = null; resolve(); };
+      const stop = () => { clearTimeout(timer); this.wake = null; reject(signal.reason); };
+      const timer = setTimeout(finish, this.ready ? 10000 : 500);
+      this.wake = finish;
+      signal.addEventListener('abort', stop, { once: true });
+    });
+  }
+  dispose() {
+    this.wake?.();
+    if (this.channel) void this.client.removeChannel(this.channel).catch(() => {});
+  }
 }
 export class FilesGateway {
   constructor(private client: SupabaseClient, private device: string, private signal: AbortSignal, private progress: (message: string) => void) {}
@@ -41,22 +67,30 @@ export class FilesGateway {
     const timer = setTimeout(() => timeout.abort(new Error(transfer ? '文件传输等待超过 30 分钟，请查看任务记录。' : '设备 90 秒内未返回结果。请检查设备 Wi-Fi 云端状态或前面的任务，再重试。')), timeoutMs);
     let id: string | undefined;
     const started = Date.now();
+    let stream: CommandStream | undefined;
     try {
+      stream = new CommandStream(this.client, this.device);
       const queued = await this.client.rpc(business ? 'link_queue_remote' : 'link_queue_command', business ? { p_device_id: this.device, p_op: op, p_path: path, p_args: extra } : { p_device_id: this.device, p_op: op, p_path: path, ...extra }).abortSignal(signal);
       check(signal);
       if (queued.error) throw queued.error;
       if (typeof queued.data !== 'string' || !queued.data.trim()) throw new Error('云端未返回任务编号，请查看任务记录。');
       id = queued.data;
+      stream.id = id;
       while (true) {
         check(signal);
-        const reply = await this.client.from('link_commands').select('*').eq('id', id).abortSignal(signal).single();
+        const observed = stream.version;
+        const cached = stream.latest;
+        const reply = cached && ['completed','failed','cancelled'].includes(cached.status)
+          ? { data: cached, error: null }
+          : await this.client.from('link_commands').select('*').eq('id', id).abortSignal(signal).single();
         check(signal);
         if (reply.error) throw reply.error;
-        const command = reply.data as Command;
+        const pushed = stream.latest;
+        const command = pushed && ['completed','failed','cancelled'].includes(pushed.status) ? pushed : reply.data as Command;
         this.progress(`${path} · ${command.status === 'waiting' ? '已提交，等待设备领取（请保持设备 Wi-Fi 联网）' : command.status === 'running' ? '设备正在读取或执行，等待结果' : command.status === 'completed' ? '设备已返回结果' : command.status} · ${Math.floor((Date.now() - started) / 1000)} 秒`);
         if (command.status === 'completed') return command.result ?? {};
         if (command.status === 'failed' || command.status === 'cancelled') throw new Error(command.error || '任务已取消');
-        await pause(signal);
+        await stream.wait(signal, observed);
       }
     } catch (error) {
       // A directory deadline only releases the foreground wait. Keep the exact
@@ -71,10 +105,13 @@ export class FilesGateway {
       throw timeout.signal.aborted && !this.signal.aborted ? timeout.signal.reason : error;
     } finally {
       clearTimeout(timer);
+      stream?.dispose();
     }
   }
-  async list(path: string, onPage?: (entries: Entry[], complete: boolean) => void, firstPage?: Record<string, unknown>, resume?: DirectoryResume): Promise<Entry[]> {
+  async list(path: string, onPage?: (entries: Entry[], complete: boolean, cursor: number) => void, firstPage?: Record<string, unknown>, resume?: DirectoryResume, maxPages = Number.MAX_SAFE_INTEGER): Promise<Entry[]> {
     const all: Entry[] = [...(resume?.entries ?? [])]; let cursor = resume?.cursor ?? 0;
+    if (!Number.isSafeInteger(maxPages) || maxPages < 1) throw new Error('目录页数无效');
+    let pages = 0;
     if (!Number.isSafeInteger(cursor) || cursor < 0) throw new Error('目录游标无效');
     if (all.length > 10000) throw new Error('单目录超过 10000 项');
     for (const item of all) {
@@ -98,8 +135,8 @@ export class FilesGateway {
       }
       if (all.length > 10000) throw new Error('单目录超过 10000 项');
       if (!r.end && (!Number.isSafeInteger(r.cursor) || Number(r.cursor) <= cursor)) throw new Error('目录游标无效');
-      onPage?.([...all], r.end);
-      if (r.end) return all;
+      onPage?.([...all], r.end, Number(r.cursor));
+      if (r.end || ++pages >= maxPages) return all;
       cursor = Number(r.cursor);
     }
   }

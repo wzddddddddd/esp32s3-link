@@ -1,4 +1,5 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import type { StorageSnapshot } from './storage';
 export interface CloudConfig {
   supabaseUrl: string;
   publishableKey: string;
@@ -10,6 +11,7 @@ export interface CloudDevice {
   firmware_version: string;
   capacity_bytes: number;
   used_bytes: number;
+  storage?: StorageSnapshot | null;
   last_seen: string | null;
   files: { name: string; size: number }[];
 }
@@ -85,13 +87,18 @@ export async function snapshot(client: SupabaseClient) {
     throw new Error(
       "账号已登录，但尚未获准使用此工作空间，请由项目所有者授权。",
     );
-  const results = await Promise.all([
-    client
+  const deviceQuery = (columns: string) => client
       .from("link_devices")
-      .select(
-        "id,name,hardware,firmware_version,capacity_bytes,used_bytes,last_seen,files",
-      )
-      .order("created_at", { ascending: false }),
+      .select(columns).returns<CloudDevice[]>().order("created_at", { ascending: false });
+  const legacyColumns = "id,name,hardware,firmware_version,capacity_bytes,used_bytes,last_seen,files";
+  const devices = async () => {
+    const result = await deviceQuery(`${legacyColumns},storage`);
+    // Keep the current website usable while the capacity migration is pending.
+    if (result.error?.code === '42703' && result.error.message.includes('storage')) return deviceQuery(legacyColumns);
+    return result;
+  };
+  const results = await Promise.all([
+    devices(),
     client
       .from("link_resources")
       .select("*")

@@ -5,6 +5,7 @@
 .file-manager button { border: 1px solid var(--line); border-radius: 8px; padding: 9px 14px; }
 .file-manager button:disabled { opacity: .45; }
 .file-manager input:not([type=checkbox]), .file-manager select { padding: 10px; max-width: 100%; }
+.file-manager input:not([type=checkbox]), .file-manager select { background: var(--panel, #171c18); color: var(--text, #eef2ef); border: 1px solid var(--line); border-radius: 8px; }
 .file-help { color: var(--muted); font-size: 13px; }
 .file-list { display: grid; gap: 8px; }
 .file-list > div { display: flex; gap: 12px; padding: 14px; border: 1px solid var(--line); align-items: center; flex-wrap: wrap; border-radius: 8px; }
@@ -12,3 +13,5 @@
 .directory-panel { border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
 .directory-panel > p { margin: 0 0 12px; }
 .file-manager .song-play { background: var(--accent, #a3e635); color: #101510; font-weight: 700; }
+.file-categories { display: flex; flex-wrap: wrap; gap: 10px; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
+.file-categories button[aria-pressed=true] { background: var(--accent, #a3e635); color: #101510; font-weight: 700; }
