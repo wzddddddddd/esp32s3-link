@@ -1,42 +1,39 @@
 import { createClient } from 'npm:@supabase/supabase-js@2';
+import { attachDeviceSocket, executeRequest, parseRequest } from './protocol.ts';
 
-// Custom device credential replaces user JWT authentication for this one endpoint.
-// Never return service keys, raw SQL errors, or other devices' data.
+// Device credentials are accepted in headers only, including the WSS upgrade.
+// Do not put device tokens or the service key in browser code or URL queries.
 Deno.serve(async request => {
-  const respond = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
-  if (request.method !== 'POST') return respond({ error: 'METHOD_NOT_ALLOWED' }, 405);
-  const id = request.headers.get('x-device-id') || '';
-  const token = request.headers.get('x-device-token') || '';
+  const respond = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
+    status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+  });
+  const upgrade = request.headers.get('upgrade')?.toLowerCase() === 'websocket';
+  if (request.method !== 'POST' && !(request.method === 'GET' && upgrade)) return respond({ error: 'METHOD_NOT_ALLOWED' }, 405);
+  const id = request.headers.get('x-device-id') || '', token = request.headers.get('x-device-token') || '';
   if (!/^[0-9a-f-]{36}$/i.test(id) || !/^[0-9a-f]{64}$/i.test(token)) return respond({ error: 'UNAUTHORIZED' }, 401);
+  const client = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
   try {
-    const text = await request.text();
-    if (text.length > 65536) return respond({ error: 'PAYLOAD_TOO_LARGE' }, 413);
-    const input = JSON.parse(text);
-    const commands = ['command_claim', 'command_progress', 'command_result'];
-    if (!input || !['heartbeat', 'claim', 'progress', ...commands].includes(input.action) || (input.payload && (typeof input.payload !== 'object' || Array.isArray(input.payload)))) return respond({ error: 'INVALID_REQUEST' }, 400);
-    const client = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!, { auth: { persistSession: false, autoRefreshToken: false } });
-    const result = await client.rpc(commands.includes(input.action) ? 'link_device_command' : 'link_device_request', { p_device_id: id, p_token: token, p_action: input.action, p_payload: input.payload || {} });
-    if (result.error) return respond({ error: result.error.code === '28000' ? 'UNAUTHORIZED' : 'REQUEST_REJECTED' }, result.error.code === '28000' ? 401 : 409);
-    if (result.data?.command) {
-      const { download_path, upload_path, ...command } = result.data.command;
-      if (command.op === 'put') {
-        const signed = await client.storage.from('link-resources').createSignedUrl(download_path, 900);
-        if (signed.error) return respond({ error: 'DOWNLOAD_URL_UNAVAILABLE', retryable: true }, 503);
-        return respond({ command: { ...command, download_url: signed.data.signedUrl } });
-      }
-      if (command.op === 'get') {
-        const signed = await client.storage.from('link-resources').createSignedUploadUrl(upload_path, { upsert: true });
-        if (signed.error) return respond({ error: 'UPLOAD_URL_UNAVAILABLE', retryable: true }, 503);
-        return respond({ command: { ...command, upload_url: signed.data.signedUrl } });
-      }
-      return respond({ command });
+    if (upgrade) {
+      // Validate before accepting the socket. This does not claim a command.
+      const auth = await client.rpc('link_device_session', { p_device_id: id, p_token: token });
+      if (auth.error || auth.data !== true) return respond({ error: 'UNAUTHORIZED' }, 401);
+      const { socket, response } = Deno.upgradeWebSocket(request);
+      attachDeviceSocket(socket, input => executeRequest(client, id, token, input), wake => {
+        const channel = client.channel(`device-wake-${id}-${crypto.randomUUID()}`)
+          .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'link_commands', filter: `device_id=eq.${id}` }, wake)
+          .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'link_tasks', filter: `device_id=eq.${id}` }, wake)
+          .subscribe(status => { if (status === 'SUBSCRIBED') wake(); });
+        return () => { void client.removeChannel(channel); };
+      });
+      return response;
     }
-    if (result.data?.task) {
-      const { storage_path, ...task } = result.data.task;
-      const signed = await client.storage.from('link-resources').createSignedUrl(storage_path, 900);
-      if (signed.error) return respond({ error: 'DOWNLOAD_URL_UNAVAILABLE', retryable: true }, 503);
-      return respond({ task: { ...task, download_url: signed.data.signedUrl, url_expires_in: 900 } });
-    }
-    return respond(result.data);
-  } catch { return respond({ error: 'INVALID_REQUEST' }, 400); }
+    const input = parseRequest(await request.text());
+    const reply = await executeRequest(client, id, token, input);
+    return respond(reply.body, reply.status);
+  } catch (e) {
+    const large = e instanceof Error && e.message === 'PAYLOAD_TOO_LARGE';
+    return respond({ error: large ? 'PAYLOAD_TOO_LARGE' : 'INVALID_REQUEST' }, large ? 413 : 400);
+  }
 });

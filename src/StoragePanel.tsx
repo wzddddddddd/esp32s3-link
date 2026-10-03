@@ -15,7 +15,7 @@ function Usage({ label, value, entries = false }: { label: string; value: Capaci
 }
 
 export default function StoragePanel({ storage }: { storage?: StorageSnapshot | null }) {
-  if (!storage || storage.version !== 1) return <p className="muted">等待固件回报分区容量；旧固件只提供 SD 卡信息。</p>;
+  if (!storage || storage.version !== 1) return <p className="muted">设备尚未上报分区数据。请确认已烧录支持容量快照的新固件并连接 Wi-Fi；刷新网页不会让旧固件产生这些数据。SD 容量仍可查看。</p>;
   return <div className="storage-panel">
     {storage.sd?.status === 'ready' ? <Usage label="SD 卡文件存储" value={storage.sd} /> : <p>SD 卡不可用，请检查挂载状态。</p>}
     <h3>运行内存</h3>

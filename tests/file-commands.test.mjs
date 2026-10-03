@@ -20,12 +20,15 @@ test('file command authentication, ownership, paths, transfer verification and r
       grant select,insert,update,delete on storage.objects to authenticated;
       create function storage.foldername(text) returns text[] language sql immutable as $$select string_to_array($1,'/')$$;
       insert into auth.users values('${own}'),('${other}');`);
-    for (const name of ['202609200001_link_cloud.sql', '202610030001_file_commands.sql', '202610030002_remote_commands.sql']) await db.exec(await readFile(new URL('../supabase/migrations/' + name, import.meta.url), 'utf8'));
+    await db.exec('create publication supabase_realtime');
+    for (const name of ['202609200001_link_cloud.sql', '202610030001_file_commands.sql', '202610030002_remote_commands.sql', '202610030003_directory_pages.sql', '202610030004_websocket.sql', '202610030005_capacity.sql']) await db.exec(await readFile(new URL('../supabase/migrations/' + name, import.meta.url), 'utf8'));
+    assert.deepEqual((await db.query("select tablename from pg_publication_tables where pubname='supabase_realtime' order by tablename")).rows.map(r=>r.tablename),['link_commands','link_devices','link_tasks']);
     await db.exec(`insert into private.link_members values('${own}'),('${other}')`);
     const role = async (r, user='') => db.exec(`reset role; set role ${r}; select set_config('request.jwt.claim.sub','${user}',false)`);
     const rpc = async (name, args) => (await db.query(`select public.${name}(${args.map((_,i)=>'$'+(i+1)).join(',')}) as result`,args)).rows[0].result;
     await role('authenticated', own);
     const device = await rpc('link_register_device', ['Test','ESP32-S3']);
+    await assert.rejects(rpc('link_device_session',[device.device_id,device.token]),/permission denied/);
     const cmd = (action, payload={}) => rpc('link_device_command',[device.device_id,device.token,action,payload]);
     const queue = (op,path,resource=null,cursor=0) => rpc('link_queue_command',[device.device_id,op,path,resource,cursor,false]);
     await assert.rejects(cmd('command_claim'), /permission denied/);
@@ -40,6 +43,27 @@ test('file command authentication, ownership, paths, transfer verification and r
     assert.equal((await db.query('select * from link_commands')).rows.length,0);
     await assert.rejects(queue('get','/empty.bin'),/not owned/);
     await role('service_role');
+    const heartbeat = (payload, token = device.token) => rpc('link_device_request', [device.device_id, token, 'heartbeat', payload]);
+    const metrics = { version: 1, uptime_ms: 200, memory: [], sd: { status: 'unavailable' } };
+    const payload = { hardware: 'ESP32-S3', capacity_bytes: 0, used_bytes: 0, storage: metrics };
+    await assert.rejects(heartbeat(payload, 'b'.repeat(64)), /Unauthorized/);
+    await assert.rejects(heartbeat({ ...payload, hardware: 'wrong' }), /Hardware mismatch/);
+    await assert.rejects(heartbeat({ ...payload, used_bytes: 1 }), /Invalid storage capacity/);
+    for (const storage of [{}, { ...metrics, version: 2 }, { ...metrics, memory: null }, { ...metrics, pad: 'x'.repeat(8192) }])
+      await assert.rejects(heartbeat({ ...payload, storage }), /Invalid storage snapshot/);
+    await heartbeat(payload);
+    await assert.rejects(rpc('link_device_request_before_capacity', [device.device_id, device.token, 'heartbeat', payload]), /permission denied/);
+    await role('authenticated', own);
+    assert.deepEqual((await db.query('select storage from link_devices where id=$1', [device.device_id])).rows[0].storage, metrics);
+    await assert.rejects(heartbeat(payload), /permission denied/);
+    await role('authenticated', other);
+    assert.equal((await db.query('select storage from link_devices where id=$1', [device.device_id])).rows.length, 0);
+    await role('service_role');
+    // Old firmware sends no snapshot and remains supported, including claim routing.
+    await heartbeat({ hardware: 'ESP32-S3', capacity_bytes: 1000, used_bytes: 20 });
+    assert.equal((await rpc('link_device_request', [device.device_id, device.token, 'claim', {}])).task, null);
+    assert.equal(await rpc('link_device_session',[device.device_id,device.token]),true);
+    await assert.rejects(rpc('link_device_session',[device.device_id,'b'.repeat(64)]),/Unauthorized/);
     await assert.rejects(rpc('link_device_command',[device.device_id,'b'.repeat(64),'command_claim',{}]),/Unauthorized/);
     assert.equal((await cmd('command_claim')).command.id,put);
     assert.equal((await cmd('command_claim')).command.id,put);
@@ -49,9 +73,15 @@ test('file command authentication, ownership, paths, transfer verification and r
     assert.equal((await cmd('command_result',{id:put,status:'completed',bytes:0,sha256:hash})).status,'completed');
     await role('authenticated',own);
     const listing = await queue('list','/novels');
-    await role('service_role'); await cmd('command_claim');
+    await role('service_role'); assert.equal((await cmd('command_claim')).command.limit,32);
     for (const result of [null,{}, {entries:[]}, {entries:[],cursor:0,end:false}]) await assert.rejects(cmd('command_result',{id:listing,status:'completed',result}),/Invalid/);
-    await cmd('command_result',{id:listing,status:'completed',result:{entries:[],cursor:0,end:true}});
+    const page = Array.from({length:32},(_,i)=>({name:`song-${i}.mp3`,size:3,directory:false}));
+    await assert.rejects(cmd('command_result',{id:listing,status:'completed',result:{entries:[...page,page[0]],cursor:33,end:true}}),/Invalid directory cursor/);
+    await cmd('command_result',{id:listing,status:'completed',result:{entries:page,cursor:32,end:true}});
+    await role('authenticated',own);
+    const oldListing = await queue('list','/music');
+    await role('service_role'); await cmd('command_claim');
+    await cmd('command_result',{id:oldListing,status:'completed',result:{entries:page.slice(0,8),cursor:8,end:false}});
     await role('authenticated',own);
     const get = await queue('get','/novels/book.txt');
     await role('service_role'); assert.equal((await cmd('command_claim')).command.id,get);
@@ -87,5 +117,9 @@ test('file command authentication, ownership, paths, transfer verification and r
     await role('authenticated',own); await assert.rejects(rpc('link_cancel_command',[running]),/Only waiting/);
     await role('service_role'); await cmd('command_result',{id:running,status:'failed',error:'SD_BUSY'});
     assert.equal((await cmd('command_claim')).command,null);
+    await db.exec('reset role');
+    await db.query('update private.link_device_secrets set revoked_at=now() where device_id=$1',[device.device_id]);
+    await role('service_role');
+    await assert.rejects(rpc('link_device_session',[device.device_id,device.token]),/Unauthorized/);
   } finally { await db.close(); }
 });

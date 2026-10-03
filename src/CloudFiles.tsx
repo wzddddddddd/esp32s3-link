@@ -3,6 +3,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { CloudDevice } from './cloud/client';
 import { child, DirectoryPendingError, FilesGateway, save, type Entry, type Command, type DirectoryResume } from './cloud/files';
 import { DirectoryReads, type PendingDirectory } from './cloud/directory-read';
+import { DirectoryCache } from './cloud/directory-cache';
 import { formatSize } from './demo';
 import './media-workspace.css';
 import StoragePanel from './StoragePanel';
@@ -18,6 +19,7 @@ export default function CloudFiles({ client, devices, categoryRoot = '/music', o
   const [path, setPath] = useState(categoryRoot), [entries, setEntries] = useState<Entry[]>([]);
   const [directoryState, setDirectoryState] = useState<'idle' | 'loading' | 'waiting' | 'partial' | 'complete'>('idle');
   const directoryReads = useRef(new DirectoryReads());
+  const directoryCache = useRef(new DirectoryCache());
   const [waitingDirectory, setWaitingDirectory] = useState<PendingDirectory | null>(null);
   const [moreDirectory, setMoreDirectory] = useState<{ request: number; path: string; resume: DirectoryResume } | null>(null);
   const [jobs, setJobs] = useState<Command[]>([]), [name, setName] = useState('');
@@ -48,7 +50,11 @@ export default function CloudFiles({ client, devices, categoryRoot = '/music', o
   }
   const active = useRef<AbortController | null>(null), input = useRef<HTMLInputElement>(null), folderInput = useRef<HTMLInputElement>(null), directoryPanel = useRef<HTMLDivElement>(null);
   useEffect(() => () => { directoryReads.current.begin(); active.current?.abort(); musicObservation.current?.abort(); }, []);
-  useEffect(() => { musicObservation.current?.abort(); }, [device]);
+  useEffect(() => {
+    musicObservation.current?.abort(); active.current?.abort();
+    directoryReads.current.begin(); setWaitingDirectory(null); setMoreDirectory(null);
+    setEntries([]); setDirectoryState('idle'); setMusicStatus('尚未读取');
+  }, [device]);
   useEffect(() => { if (!device && devices.length) setDevice(devices[0].id); }, [device, devices]);
   useEffect(() => { onBusyChange?.(busy); }, [busy, onBusyChange]);
   useEffect(() => () => onBusyChange?.(false), [onBusyChange]);
@@ -118,7 +124,7 @@ export default function CloudFiles({ client, devices, categoryRoot = '/music', o
   }
   async function run(action: (g: FilesGateway) => Promise<void | string>, preserveDirectory = false) {
     if (active.current || !device) return;
-    if (!preserveDirectory) discardDirectory();
+    if (!preserveDirectory) { discardDirectory(); directoryCache.current.invalidate(device); }
     const controller = new AbortController(); active.current = controller;
     setBusy(true); setError(''); setMessage('正在提交…');
     try { const result = await action(new FilesGateway(client, device, controller.signal, text => { if(!controller.signal.aborted) setMessage(text); })); controller.signal.throwIfAborted(); setMessage(result || '设备已返回结果；播放命令以实际状态为准'); }
@@ -128,7 +134,7 @@ export default function CloudFiles({ client, devices, categoryRoot = '/music', o
     } }
     finally { if(active.current === controller) { active.current = null; setBusy(false); } }
   }
-  function list(target: string, firstPage?: Record<string, unknown>) {
+  function list(target: string, firstPage?: Record<string, unknown>, force = true) {
     if (active.current || !device) return;
     if (category.root !== '/' && target !== category.root && !target.startsWith(category.root + '/')) {
       const next = categories.find(item => item.root !== '/' && (target === item.root || target.startsWith(item.root + '/'))) ?? categories.at(-1)!;
@@ -142,12 +148,20 @@ export default function CloudFiles({ client, devices, categoryRoot = '/music', o
       directoryPanel.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
       return;
     }
-    readDirectory(target, firstPage, undefined, discardDirectory());
+    const request = discardDirectory();
+    const cached = !force && !firstPage ? directoryCache.current.get(device, target) : undefined;
+    if (cached) {
+      setPath(target); setEntries(cached.entries); setDirectoryState(cached.complete ? 'complete' : 'partial');
+      setMoreDirectory(cached.complete ? null : { request, path: target, resume: { cursor: cached.cursor, entries: cached.entries } });
+      setMessage('显示最近 30 秒内读取的目录。点击刷新可重新读取设备。'); setError('');
+      return;
+    }
+    readDirectory(target, firstPage, undefined, request);
   }
   function chooseCategory(item: MediaCategory) {
     if (active.current) return;
     setCategory(item); setSearch(''); onCategoryChange?.(item.root);
-    if (device) list(item.root);
+    if (device) list(item.root, undefined, false);
     else { setPath(item.root); setEntries([]); setDirectoryState('idle'); }
   }
   function readDirectory(target: string, firstPage: Record<string, unknown> | undefined, resume: DirectoryResume | undefined, request: number) {
@@ -158,6 +172,7 @@ export default function CloudFiles({ client, devices, categoryRoot = '/music', o
       try {
         const items = await g.list(target, (page, complete, cursor) => { if (directoryReads.current.current(request)) {
           setEntries(page); setDirectoryState(complete ? 'complete' : 'partial');
+          directoryCache.current.put(device, target, page, complete, cursor);
           setMoreDirectory(complete ? null : { request, path: target, resume: { cursor, entries: page } });
         } }, firstPage, resume, 1);
         return `${target} 目录已显示，共 ${items.length} 项。`;

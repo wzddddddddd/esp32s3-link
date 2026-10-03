@@ -45,7 +45,9 @@ class CommandStream {
       if (this.version !== version) { resolve(); return; }
       const finish = () => { clearTimeout(timer); signal.removeEventListener('abort', stop); this.wake = null; resolve(); };
       const stop = () => { clearTimeout(timer); this.wake = null; reject(signal.reason); };
-      const timer = setTimeout(finish, this.ready ? 10000 : 500);
+      // SUBSCRIBED confirms the socket, not database publication or delivery.
+      // Recover missing events within one second without slowing live pushes.
+      const timer = setTimeout(finish, this.ready ? 1000 : 500);
       this.wake = finish;
       signal.addEventListener('abort', stop, { once: true });
     });
