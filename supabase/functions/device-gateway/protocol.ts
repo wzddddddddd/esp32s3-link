@@ -10,7 +10,8 @@ export function parseRequest(text: string): GatewayRequest {
 }
 // The injected client uses the server's service key. Every business RPC still
 // authenticates the device token and checks ownership; transport is irrelevant.
-export async function executeRequest(client: any, id: string, token: string, input: GatewayRequest): Promise<GatewayReply> {
+export async function executeRequest(client: any, id: string, token: string, input: GatewayRequest,
+    verifyFirmware?: (bytes: Uint8Array) => Promise<{size: number; sha256: string}>): Promise<GatewayReply> {
   const commands = input.action.startsWith('command_');
   const result = await client.rpc(commands ? 'link_device_command' : 'link_device_request', {
     p_device_id: id, p_token: token, p_action: input.action, p_payload: input.payload || {},
@@ -19,12 +20,28 @@ export async function executeRequest(client: any, id: string, token: string, inp
     body: { error: result.error.code === '28000' ? 'UNAUTHORIZED' : 'REQUEST_REJECTED' } };
   if (result.data?.command) {
     const { download_path, upload_path, ...command } = result.data.command;
-    if (command.op === 'put' || command.op === 'get') {
+    if (command.op === 'put' || command.op === 'get' || command.op === 'ota.install') {
       const store = client.storage.from('link-resources');
-      const signed = command.op === 'put' ? await store.createSignedUrl(download_path, 900)
+      if (command.op === 'ota.install') {
+        const object = await store.download(download_path);
+        if (object.error) return { status: 503, body: { error: 'OTA_DOWNLOAD_VALIDATION_UNAVAILABLE', retryable: true } };
+        try {
+          if (!verifyFirmware || command.target_role !== 'main' || !Number.isSafeInteger(command.size)
+              || command.size < 288 || command.size > 4194304 || !/^[0-9a-f]{64}$/.test(command.sha256)) throw new Error('Invalid OTA metadata');
+          if (!object.data || object.data.size !== command.size) throw new Error('OTA storage size mismatch');
+          const firmware = await verifyFirmware(new Uint8Array(await object.data.arrayBuffer()));
+          if (firmware.size !== command.size || firmware.sha256 !== command.sha256) throw new Error('OTA storage SHA256 mismatch');
+        } catch {
+          await client.rpc('link_device_command', { p_device_id: id, p_token: token, p_action: 'command_result',
+            p_payload: { id: command.id, status: 'failed', error: 'OTA_FIRMWARE_INVALID: main ESP32-S3 image/size/SHA256 verification failed' } });
+          return { status: 200, body: { command: null, error: 'OTA_FIRMWARE_INVALID' } };
+        }
+      }
+      const download = command.op !== 'get';
+      const signed = download ? await store.createSignedUrl(download_path, 900)
         : await store.createSignedUploadUrl(upload_path, { upsert: true });
-      if (signed.error) return { status: 503, body: { error: command.op === 'put' ? 'DOWNLOAD_URL_UNAVAILABLE' : 'UPLOAD_URL_UNAVAILABLE', retryable: true } };
-      return { status: 200, body: { command: { ...command, [command.op === 'put' ? 'download_url' : 'upload_url']: signed.data.signedUrl } } };
+      if (signed.error) return { status: 503, body: { error: download ? 'DOWNLOAD_URL_UNAVAILABLE' : 'UPLOAD_URL_UNAVAILABLE', retryable: true } };
+      return { status: 200, body: { command: { ...command, [download ? 'download_url' : 'upload_url']: signed.data.signedUrl } } };
     }
     return { status: 200, body: { command } };
   }

@@ -1,5 +1,6 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type { StorageSnapshot } from './storage';
+import type { OtaSnapshot } from './ota';
 export interface CloudConfig {
   supabaseUrl: string;
   publishableKey: string;
@@ -12,6 +13,8 @@ export interface CloudDevice {
   capacity_bytes: number;
   used_bytes: number;
   storage?: StorageSnapshot | null;
+  firmware_mode?: 'main' | 'recovery';
+  ota?: OtaSnapshot | null;
   last_seen: string | null;
   wifi_connected?: boolean;
   presence_seen?: string | null;
@@ -94,9 +97,13 @@ export async function snapshot(client: SupabaseClient) {
       .select(columns).returns<CloudDevice[]>().order("created_at", { ascending: false });
   const legacyColumns = "id,name,hardware,firmware_version,capacity_bytes,used_bytes,last_seen,files";
   const devices = async () => {
-    const result = await deviceQuery(`${legacyColumns},storage,wifi_connected,presence_seen`);
+    const result = await deviceQuery(`${legacyColumns},storage,wifi_connected,presence_seen,firmware_mode,ota`);
     // Keep the current website usable while the capacity migration is pending.
-    if (result.error?.code === '42703' && result.error.message.includes('storage')) return deviceQuery(legacyColumns);
+    if (result.error?.code === '42703') {
+      if (result.error.message.includes('storage')) return deviceQuery(legacyColumns);
+      const compatible = await deviceQuery(`${legacyColumns},storage,wifi_connected,presence_seen`);
+      return compatible.error?.code === '42703' ? deviceQuery(legacyColumns) : compatible;
+    }
     return result;
   };
   const results = await Promise.all([

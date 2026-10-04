@@ -8,7 +8,6 @@ import {
   ListChecks,
   LogOut,
   Plus,
-  ShieldCheck,
   Cpu,
   RefreshCw,
 } from "lucide-react";
@@ -22,6 +21,7 @@ import {
 } from "./cloud/client";
 import { formatSize } from "./demo";
 import CloudFiles from './CloudFiles';
+import CloudOta from './CloudOta';
 import StoragePanel from './StoragePanel';
 import { mediaCategories, fileCategory } from './media';
 import { mediaIcons } from './MediaDirectory';
@@ -233,7 +233,7 @@ export default function CloudApp({
         });
       else if (resource.kind === "image")
         setPreview({ name: resource.name, url: URL.createObjectURL(data) });
-      else setMessage("固件已保存。真实 OTA 暂未启用。");
+      else setMessage("固件已保存。请到“固件与升级”页面选择主应用 BIN 并开始升级。");
     });
   }
   const device = devices.find((d) => d.id === target);
@@ -448,6 +448,7 @@ export default function CloudApp({
                         <dt>固件</dt>
                         <dd>{d.firmware_version || "等待设备回报"}</dd>
                       </div>
+                      <div><dt>运行模式</dt><dd>{d.firmware_mode === 'recovery' ? 'OTA 恢复程序' : '主程序'}</dd></div>
                       <div>
                         <dt>剩余空间</dt>
                         <dd>
@@ -691,18 +692,7 @@ export default function CloudApp({
               )}
             </div>
           )}
-          {view === "ota" && (
-            <section className="panel">
-              <ShieldCheck size={32} />
-              <h2>先验证资源传输，再启用真实 OTA</h2>
-              <p className="muted">
-                你可以上传固件存档，但当前云端接口会拒绝固件更新任务。需要确认设备分区、签名校验、断电恢复和回滚机制，再开放实际更新。
-              </p>
-              <button className="button" onClick={() => setView("resources")}>
-                管理固件存档
-              </button>
-            </section>
-          )}
+          {view === "ota" && <CloudOta client={client} devices={devices} resources={resources} refresh={refresh} onBusyChange={setMediaBusy} blocked={!!busy} />}
           <footer>
             <span>LINK / 私有云端工作空间</span>
             <span>HTTPS · 账号隔离 · 设备独立凭证</span>

@@ -1,5 +1,6 @@
 import { createClient } from 'npm:@supabase/supabase-js@2';
 import { attachDeviceSocket, executeRequest, parseRequest } from './protocol.ts';
+import { inspectMainFirmware } from '../_shared/firmware.ts';
 
 // Device credentials are accepted in headers only, including the WSS upgrade.
 // Do not put device tokens or the service key in browser code or URL queries.
@@ -25,7 +26,7 @@ Deno.serve(async request => {
         const result = await client.rpc('link_device_presence', { p_device_id: id, p_token: token, p_event: event, p_session: session });
         if (result.error || (event !== 'close' && result.data !== true)) throw new Error('PRESENCE_UNAVAILABLE');
       };
-      attachDeviceSocket(socket, input => executeRequest(client, id, token, input), wake => {
+      attachDeviceSocket(socket, input => executeRequest(client, id, token, input, inspectMainFirmware), wake => {
         const channel = client.channel(`device-wake-${id}-${crypto.randomUUID()}`)
           .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'link_commands', filter: `device_id=eq.${id}` }, wake)
           .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'link_tasks', filter: `device_id=eq.${id}` }, wake)
@@ -37,7 +38,7 @@ Deno.serve(async request => {
     const input = parseRequest(await request.text());
     const presence = await client.rpc('link_device_presence', { p_device_id: id, p_token: token, p_event: 'http', p_session: null });
     if (presence.error) return respond({ error: 'UNAUTHORIZED' }, 401);
-    const reply = await executeRequest(client, id, token, input);
+    const reply = await executeRequest(client, id, token, input, inspectMainFirmware);
     return respond(reply.body, reply.status);
   } catch (e) {
     const large = e instanceof Error && e.message === 'PAYLOAD_TOO_LARGE';
