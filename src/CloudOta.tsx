@@ -21,8 +21,8 @@ export default function CloudOta({ client, devices, resources, refresh, onBusyCh
   client: SupabaseClient; devices: CloudDevice[]; resources: CloudResource[]; refresh: () => Promise<void>;
   onBusyChange: (busy: boolean) => void; blocked: boolean;
 }) {
-  const [target, setTarget] = useState(''), [resourceId, setResourceId] = useState('');
-  const [status, setStatus] = useState<OtaSnapshot | null>(null), [message, setMessage] = useState('');
+  const [target, setTarget] = useState(() => devices[0]?.id ?? ''), [resourceId, setResourceId] = useState('');
+  const [status, setStatus] = useState<OtaSnapshot | null>(() => devices[0]?.ota ?? null), [message, setMessage] = useState('');
   const [error, setError] = useState(''), [busy, setBusy] = useState(false), [controlBusy, setControlBusy] = useState(false);
   const [offline, setOffline] = useState(false), [confirm, setConfirm] = useState(false);
   const abort = useRef<AbortController | null>(null), active = useRef(false), dialog = useRef<HTMLDialogElement>(null);
@@ -106,8 +106,10 @@ export default function CloudOta({ client, devices, resources, refresh, onBusyCh
       <div className="ota-phase"><CheckCircle2 size={27} /><strong>{status ? phaseLabels[status.phase] || status.phase : '等待设备回报'}</strong></div>
       {total > 0 ? <><progress max={total} value={Math.min(received, total)} aria-label="固件写入进度" /><div className="ota-byte-count"><span>{formatSize(received)} / {formatSize(total)}</span><strong>{Math.floor(received / total * 100)}%</strong></div></> : <p className="muted">写入请求接受后，显示设备回报的实际字节进度。</p>}
       {status?.job && <p className="ota-job">任务 {status.job}</p>}
-      {status?.main_dirty && <div className="cloud-error">主固件不完整，当前不能返回主程序。请重新安装有效的主固件。</div>}
-      {(status?.error_detail || status?.message) && <p>{status.error_detail || status.message}</p>}
+      {status?.main_dirty && <div className={status.active ? 'inline-note' : 'cloud-error'}>{status.active
+        ? '正在更新主程序，完成校验后才能返回。'
+        : '主固件不完整，当前不能返回主程序。请重新安装有效的主固件。'}</div>}
+      {status?.message ? <p>{status.message}</p> : status?.error_detail && status.error_detail !== 'ESP_OK' ? <p>{status.error_detail}</p> : null}
       {message && <p className="inline-note" role="status">{message}</p>}{error && <div className="cloud-error" role="alert">{error}</div>}
       <div className="ota-controls"><button className="button" disabled={!device || controlBusy || blocked} onClick={() => void control('ota.status')}><RefreshCw size={15} />读取状态</button>
         <button className="button" disabled={!recovery || !status?.active || controlBusy || blocked} onClick={() => void control('ota.cancel')}><Square size={14} />取消升级</button>
