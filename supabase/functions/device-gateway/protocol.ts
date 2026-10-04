@@ -103,7 +103,9 @@ export function attachDeviceSocket(socket: DeviceSocket,
     chain = chain.then(async () => {
       if (disposed) return;
       try {
-        if (presence) await presence('renew');
+        // Presence frames renew independently every three seconds. Business
+        // RPCs authenticate every request; do not add a database round trip
+        // to the command/result path just to renew the same presence lease.
         if (disposed) return;
         const reply = await execute(input);
         send({ id, ...reply });

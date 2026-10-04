@@ -4,6 +4,25 @@ import { readFile, writeFile, unlink } from 'node:fs/promises';
 import ts from 'typescript';
 const compile = source => ts.transpileModule(source, {compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText;
 const flush = () => new Promise(resolve => setImmediate(resolve));
+test('MP3 uploads use the allowed binary MIME without changing bytes or target', async () => {
+  const output = new URL(`.upload-files-${process.pid}.mjs`, import.meta.url);
+  await writeFile(output, compile(await readFile(new URL('../src/cloud/files.ts', import.meta.url), 'utf8')));
+  try {
+    const { FilesGateway } = await import(output.href);
+    const file = new File([new Uint8Array([0x49, 0x44, 0x33, 1, 2, 3])], 'test.mp3', { type: 'audio/mpeg' });
+    let uploaded;
+    const client = { auth: { getUser: async () => ({ data: { user: { id: 'owner' } } }) },
+      storage: { from: () => ({ upload: async (_path, body) => { uploaded = body; return {}; } }) },
+      rpc: async () => ({ data: 'resource' }) };
+    const gateway = new FilesGateway(client, 'device', new AbortController().signal, () => {});
+    let command;
+    gateway.command = async (...args) => { command = args; return {}; };
+    await gateway.put(file, '/music/test.mp3', false);
+    assert.equal(uploaded.type, 'application/octet-stream');
+    assert.deepEqual(new Uint8Array(await uploaded.arrayBuffer()), new Uint8Array(await file.arrayBuffer()));
+    assert.deepEqual(command, ['put', '/music/test.mp3', { p_resource_id: 'resource', p_overwrite: false }]);
+  } finally { await unlink(output); }
+});
 test('device socket serializes requests, pushes wakeups and cleans subscriptions', async () => {
   const output = new URL(`.ws-protocol-${process.pid}.mjs`,import.meta.url);
   await writeFile(output,compile(await readFile(new URL('../supabase/functions/device-gateway/protocol.ts',import.meta.url),'utf8')));
@@ -41,7 +60,7 @@ test('device socket serializes requests, pushes wakeups and cleans subscriptions
     liveSocket.onopen();await flush();assert.deepEqual(events,['open']);
     liveSocket.onmessage({data:'{"id":1,"action":"command_claim"}'});await flush();
     liveSocket.onmessage({data:'{"type":"presence"}'});await flush();
-    assert.deepEqual(events,['open','renew','renew'],'presence bypasses a blocked business request');
+    assert.deepEqual(events,['open','renew'],'presence bypasses a blocked business request without an extra renewal per command');
     liveSocket.close();await flush();assert.equal(events.at(-1),'close');
     unblock();await flush();
     let args;

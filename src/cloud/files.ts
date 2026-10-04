@@ -155,7 +155,10 @@ export class FilesGateway {
     const user = await this.client.auth.getUser();
     if (user.error || !user.data.user) throw new Error('请重新登录');
     const storage = `${user.data.user.id}/${crypto.randomUUID()}/payload`;
-    const uploaded = await this.client.storage.from('link-resources').upload(storage, file, { contentType: 'application/octet-stream', upsert: false });
+    // storage-js sends Blob uploads as multipart and takes the MIME from the
+    // Blob itself, ignoring contentType for the part. Keep the bytes intact.
+    const uploaded = await this.client.storage.from('link-resources').upload(storage,
+      file.slice(0, file.size, 'application/octet-stream'), { contentType: 'application/octet-stream', upsert: false });
     if (uploaded.error) throw uploaded.error;
     const resource = await this.client.rpc('link_register_file', { p_path: storage, p_name: file.name, p_sha256: hash });
     if (resource.error) { await this.client.storage.from('link-resources').remove([storage]); throw resource.error; }
